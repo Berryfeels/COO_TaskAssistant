@@ -14,15 +14,27 @@ def _due(task: Task) -> str:
     return f", due {task.due}" if task.due else ""
 
 
-def render_confirmation(pending_id: str, task: Task) -> str:
-    """Confirmation message always carries the pending reference (spec 5.3)."""
+def render_confirmation(pending_id: str, task: Task,
+                        similar: list[str] | None = None) -> str:
+    """Confirmation message always carries the pending reference (spec 5.3).
+
+    `similar` carries near-duplicate hits (pending or existing tasks) found
+    by the pipeline guard: appended as a heads-up, never blocking.
+    """
     if task.action.value == "create":
         who = f" for {', '.join(task.assignees)}" if task.assignees else ""
-        return (f"{ACTION_VERB[task.action.value]} '{task.title}'{who}"
-                f"{_due(task)}. Reply \"OK {pending_id}\" to confirm. [{pending_id}]")
-    return (f"{ACTION_VERB[task.action.value]} "
-            f"'{task.title or task.target_card_id}'{_due(task)}. "
-            f"Reply \"OK {pending_id}\" to confirm. [{pending_id}]")
+        msg = (f"{ACTION_VERB[task.action.value]} '{task.title}'{who}"
+               f"{_due(task)}. Reply \"OK {pending_id}\" to confirm. "
+               f"[{pending_id}]")
+    else:
+        msg = (f"{ACTION_VERB[task.action.value]} "
+               f"'{task.title or task.target_card_id}'{_due(task)}. "
+               f"Reply \"OK {pending_id}\" to confirm. [{pending_id}]")
+    if similar:
+        msg += ("\nHeads-up: similar task(s) found: "
+                + "; ".join(similar)
+                + ". Confirm only if this is a different task.")
+    return msg
 
 
 def render_result(task: Task, card: dict) -> str:

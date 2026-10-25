@@ -25,15 +25,31 @@ from ..trello.client import TrelloLike
 API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 SYSTEM_PROMPT = """You are the task-management assistant of a COO team.
-The user speaks English. Every user message contains either a NEW task or a
+The user may write in any language (typically English or Italian): understand
+any language and ask any clarifying question in the user's language, but
+ALWAYS write the card content (title, description) in English.
+Every user message contains either a NEW task or a
 MODIFICATION of an existing task. Return ONLY a JSON object with these fields:
 action (create|update|complete|move_date|archive|query), target_card_id (null
-for create), title, description, assignees (Trello member IDs, resolved via
-list_members), due (ISO 8601, resolved in Europe/Berlin), done (bool),
-list_id, labels, confidence (0-1), source_message_id.
+for create), title (in English; if the user does not state a title, generate
+a short English title from the request), description (in English; collect
+there every other useful detail - constraints, contact person with email and
+phone, location, notes - and translate EVERY word to English, e.g. Italian
+"maestra" becomes "teacher"), assignees (Trello member IDs of the
+responsible person: in "X must do Y" the subject X is ALWAYS the responsible
+member - ALWAYS call list_members and match X against the members' full
+names by first name (e.g. "Stefano" matches "Stefano Di Puma") BEFORE asking
+anything; put the member ID in assignees whenever the person is on the
+board; only ask a clarifying question if no member matches), due
+(ISO 8601 date AND time when a time is given, with
+the explicit Europe/Berlin UTC offset, e.g. "2026-11-17T08:00:00+01:00"),
+done (bool), list_id (null for create unless the user names a column; the system places
+new cards in the default list - never guess or invent a list ID),
+labels (always [] for now: label resolution is not implemented, never invent
+label IDs), confidence (0-1), source_message_id.
 If anything is ambiguous (several cards match, unknown person, incomplete
-date), set confidence below 0.7 and add a "question" field with ONE short
-clarifying question in English. Never invent card or member IDs: use the
+or inconsistent date), set confidence below 0.7 and add a "question" field
+with ONE short clarifying question. Never invent card or member IDs: use the
 tools to resolve them. Today is {today} ({weekday}, Europe/Berlin).
 """
 
@@ -71,15 +87,18 @@ class MistralLLM:
 
     # -- API plumbing ---------------------------------------------------------
     def _complete(self, messages: list[dict]) -> dict:
+        # NOTE: response_format json_object must NOT be set here: combined
+        # with tools it makes the model loop on tool calls without ever
+        # emitting the final answer (observed on mistral-small-latest).
+        # _parse() extracts the JSON from the (possibly fenced) content.
         body = json.dumps({
             "model": self.model, "messages": messages,
             "tools": _TOOLS, "temperature": 0.2,
-            "response_format": {"type": "json_object"},
         }).encode()
         req = urllib.request.Request(API_URL, data=body, method="POST")
         req.add_header("Authorization", f"Bearer {self.api_key}")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read())["choices"][0]["message"]
 
     # -- tool dispatch ----------------------------------------------------------
