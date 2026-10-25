@@ -18,6 +18,7 @@ from .confirm.pending import PendingDecision, PendingService
 from .notify import builder
 from .orchestrator.agent import LLMProvider
 from .schema import Action, Clarification, Task
+from .similarity import is_similar
 from .storage.db import DB
 from .trello.client import TrelloLike
 
@@ -88,9 +89,30 @@ class Pipeline:
         # 4. Write action: validate, save pending, mark processed (same
         #    transaction semantics, spec 5.2), ask for confirmation.
         task.validate()
+        similar = self._similar_tasks(user_id, task)
         pending_id = self.pending.save(user_id, task, time.time())
         self.db.mark_processed(message_id)              # NOT an execution
-        await self.gateway.send(user_id, builder.render_confirmation(pending_id, task))
+        await self.gateway.send(
+            user_id, builder.render_confirmation(pending_id, task, similar))
+
+    def _similar_tasks(self, user_id: str, task: Task) -> list[str]:
+        """Near-duplicate guard: message-ID idempotency (spec 5.2) cannot
+        catch a reworded repeat of a forgotten task, so warn about active
+        pendings and open cards with a similar title. Only a heads-up in
+        the confirmation - the user decides; nothing is ever blocked."""
+        if task.action != Action.create:
+            return []
+        hits: list[str] = []
+        for row in self.pending.active(user_id):
+            if (row.task.action == Action.create and row.task.title
+                    and is_similar(row.task.title, task.title)):
+                hits.append(f"'{row.task.title}' (pending [{row.pending_id}])")
+        for card in self.trello.board_cards():
+            if card.get("closed") or not card.get("name"):
+                continue
+            if is_similar(card["name"], task.title):
+                hits.append(f"'{card['name']}' (already on the board)")
+        return hits
 
     async def _answer_query(self, user_id: str, task: Task) -> None:
         cards = self.trello.search_cards("") or []
