@@ -24,8 +24,8 @@ Legend: [x] done, [ ] todo.
 
 - [x] FIFO queue per user (`app/queueing.py`)
 - [x] Pipeline: handle_incoming / confirmation flow with a Gateway stub (`app/pipeline.py`)
-- [ ] SimpleX gateway: WebSocket client to the SimpleX Chat CLI/bot API (receive messages, send replies; replaces the Gateway stub)
-- [ ] User mapping: SimpleX contact <-> Trello member (users table)
+- [x] SimpleX gateway: WebSocket client to the SimpleX Chat CLI/bot API (receive messages, send replies; replaces the Gateway stub)
+- [x] User mapping: SimpleX contact <-> Trello member (users table)
 - [ ] End-to-end test: text message in SimpleX -> card on the board
 
 ## Step 4 — Pending lifecycle: confirmation, 24h expiry, 3 daytime reminders, cancellation notice
