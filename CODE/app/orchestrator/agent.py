@@ -1,8 +1,8 @@
 """Orchestrator: intent + extraction in one reasoning step (spec 2.1).
 
 The LLM sits behind a Protocol. MockLLM is deterministic and used in tests;
-ClaudeLLM is the real implementation (requires the `anthropic` package and
-ANTHROPIC_API_KEY; phase 2 of the build order enables it).
+the real implementation is MistralLLM (see mistral_llm.py, requires
+MISTRAL_API_KEY).
 """
 from __future__ import annotations
 
@@ -83,15 +83,3 @@ class MockLLM:
 
         return Task(action=Action.query, confidence=0.3,
                     source_message_id=msg_id)
-
-
-class ClaudeLLM:
-    """Deprecated: the project uses the Mistral API instead.
-    Kept only for reference; see orchestrator/mistral_llm.py."""
-
-    def __init__(self, api_key: str, board_id: str):
-        self.api_key = api_key
-        self.board_id = board_id
-
-    def interpret(self, text: str, user: dict, trello: TrelloLike) -> Task:
-        raise NotImplementedError("Use MistralLLM (app/orchestrator/mistral_llm.py).")

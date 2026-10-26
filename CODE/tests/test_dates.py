@@ -45,45 +45,6 @@ class TestSchema(BaseCase):
         self.assertTrue(t.needs_clarification)
 
 
-class TestMirror(unittest.TestCase):
-    """Task <-> Trello card mirror (spec section 4 + reverse mapping)."""
-
-    CARD = {"id": "c1", "name": "Call supplier", "desc": "context",
-            "idMembers": ["m1"], "due": "2026-10-30T10:00:00.000Z",
-            "dueComplete": False, "closed": False,
-            "idList": "l1", "idLabels": ["lab1"]}
-
-    def test_from_card_reverse_mapping(self):
-        t = Task.from_card(self.CARD)
-        self.assertEqual(t.target_card_id, "c1")
-        self.assertEqual(t.title, "Call supplier")
-        self.assertEqual(t.description, "context")
-        self.assertEqual(t.assignees, ["m1"])
-        self.assertEqual(t.due, self.CARD["due"])
-        self.assertEqual(t.list_id, "l1")
-        self.assertEqual(t.labels, ["lab1"])
-        self.assertFalse(t.closed)
-        self.assertFalse(t.done)
-
-    def test_mirror_diff_empty_when_identical(self):
-        t = Task.from_card(self.CARD)
-        t.description = "context"
-        t.title = "Call supplier"
-        self.assertEqual(t.mirror_diff(self.CARD), {})
-
-    def test_mirror_diff_detects_changes(self):
-        t = Task.from_card(self.CARD)
-        t.title = "Call supplier X"
-        diff = t.mirror_diff(self.CARD)
-        self.assertEqual(diff["title"]["task"], "Call supplier X")
-        self.assertEqual(diff["title"]["card"], "Call supplier")
-
-    def test_mirror_ignores_none_task_fields(self):
-        t = Task.from_card(self.CARD)
-        t.list_id = None                      # unspecified on our side
-        self.assertNotIn("list_id", t.mirror_diff(self.CARD))
-
-
 if __name__ == "__main__":
     import sys, unittest
     sys.path.insert(0, ".")

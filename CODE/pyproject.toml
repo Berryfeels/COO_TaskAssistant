@@ -5,6 +5,8 @@ description = "COO Task Management Tool - SimpleX + Trello assistant agent"
 requires-python = ">=3.11"
 dependencies = [
     # Core (phases 1-4) runs on the standard library only.
+    # SimpleX gateway (build step 3):
+    "websockets",  # WebSocket client for the SimpleX Chat CLI JSON API
     # Add these when enabling the respective later phases:
     # Mistral API: standard library only, no SDK needed (see mistral_llm.py)
     # "fastapi", "uvicorn"  # phase 6 webhook endpoint
