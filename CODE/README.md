@@ -78,4 +78,17 @@ NOT deleted: it stays on the board for review in the Trello dashboard
 
 ## Configure
 
-Copy `.env.example` to `.env` and fill in Trello/LLM credentials for real runs.
+`.env` (git-ignored, never committed) holds the settings for real runs:
+
+    # Trello
+    TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID
+    TRELLO_SANDBOX_BOARD_ID, TRELLO_SANDBOX_LIST_ID   # sandbox board used by
+                                                      # scripts/*_test.py
+    # Mistral LLM
+    MISTRAL_API_KEY, MISTRAL_MODEL
+    # SimpleX gateway (later phases)
+    SIMPLEX_WS_URL
+    # Storage, timezone and pending lifecycle (spec 5.1)
+    DATABASE_PATH, TIMEZONE,
+    PENDING_TTL_HOURS, PENDING_REMINDER_INTERVAL_HOURS,
+    PENDING_MAX_REMINDERS, REMINDER_QUIET_START, REMINDER_QUIET_END
