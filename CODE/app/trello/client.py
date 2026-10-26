@@ -26,9 +26,11 @@ class TrelloClient:
 
     BASE = "https://api.trello.com/1"
 
-    def __init__(self, key: str, token: str, board_id: str):
+    def __init__(self, key: str, token: str, board_id: str,
+                 default_list_id: str = ""):
         self.key, self.token = key, token
         self._board_id = board_id          # may be a short ID (URL slug)
+        self.default_list_id = default_list_id   # Trello requires idList on create
         self._full_board_id: str | None = None
 
     @property
@@ -51,8 +53,11 @@ class TrelloClient:
 
     # -- writes -------------------------------------------------------------
     def create_card(self, task: Task) -> dict:
+        # idList is required by Trello: fall back to the configured default
+        # list when the orchestrator left it empty (no column named)
         return self._req("POST", "/cards", {
-            "idList": task.list_id, "name": task.title, "desc": task.description,
+            "idList": task.list_id or self.default_list_id,
+            "name": task.title, "desc": task.description,
             "due": task.due, "idMembers": ",".join(task.assignees),
             "idLabels": ",".join(task.labels)})
 

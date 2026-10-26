@@ -42,6 +42,12 @@ def render_result(task: Task, card: dict) -> str:
     return f"Done: '{name}' updated in Trello."
 
 
+def render_write_error(task: Task, error: Exception) -> str:
+    return (f"Sorry, I could not write "
+            f"'{task.title or task.action.value}' to Trello ({error}). "
+            f"It was NOT created - please send the task again.")
+
+
 def render_clarification(question: str) -> str:
     return question
 

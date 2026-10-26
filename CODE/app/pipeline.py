@@ -62,8 +62,16 @@ class Pipeline:
         # 1. Is this a confirmation of an existing pending action?
         decision = self.pending.match_confirmation(user_id, text)
         if decision.kind == "applied":
-            result = self.trello.apply(decision.task)   # the only Trello write
             self.db.mark_processed(message_id)          # message fully handled
+            try:
+                result = self.trello.apply(decision.task)   # the only Trello write
+            except Exception as e:
+                # the pending is consumed: tell the user instead of
+                # failing silently (the error must never look like a
+                # connection problem)
+                await self.gateway.send(
+                    user_id, builder.render_write_error(decision.task, e))
+                return
             await self.gateway.send(user_id, builder.render_result(decision.task, result))
             return
         if decision.kind == "ambiguous":

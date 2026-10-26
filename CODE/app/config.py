@@ -25,8 +25,10 @@ class Settings:
     trello_key: str = ""
     trello_token: str = ""
     trello_board_id: str = ""
+    trello_default_list_id: str = ""       # where creates land when no column is named
     mistral_api_key: str = ""
     mistral_model: str = "mistral-small-latest"
+    simplex_ws_url: str = "ws://127.0.0.1:5225"
 
 
 def _load() -> Settings:
@@ -41,8 +43,10 @@ def _load() -> Settings:
         trello_key=_env("TRELLO_KEY", ""),
         trello_token=_env("TRELLO_TOKEN", ""),
         trello_board_id=_env("TRELLO_BOARD_ID", ""),
+        trello_default_list_id=_env("TRELLO_DEFAULT_LIST_ID", ""),
         mistral_api_key=_env("MISTRAL_API_KEY", ""),
         mistral_model=_env("MISTRAL_MODEL", "mistral-small-latest"),
+        simplex_ws_url=_env("SIMPLEX_WS_URL", "ws://127.0.0.1:5225"),
     )
 
 
