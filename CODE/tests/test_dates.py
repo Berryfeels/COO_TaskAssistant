@@ -40,6 +40,20 @@ class TestSchema(BaseCase):
         with self.assertRaises(ValueError):
             Task(action=Action.update, title="x").validate()
 
+    def test_move_date_requires_due(self):
+        with self.assertRaises(ValueError):
+            Task(action=Action.move_date, target_card_id="card1").validate()
+
+    def test_update_requires_a_change(self):
+        with self.assertRaises(ValueError):
+            Task(action=Action.update, target_card_id="card1").validate()
+
+    def test_update_with_change_passes(self):
+        Task(action=Action.update, target_card_id="card1",
+             due="2026-11-01T10:00:00+01:00").validate()
+        Task(action=Action.update, target_card_id="card1",
+             done=True).validate()
+
     def test_low_confidence_needs_clarification(self):
         t = Task(action=Action.create, title="x", confidence=0.3)
         self.assertTrue(t.needs_clarification)

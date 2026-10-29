@@ -37,15 +37,39 @@ def render_confirmation(pending_id: str, task: Task,
     return msg
 
 
-def render_result(task: Task, card: dict) -> str:
+def render_result(task: Task, card: dict,
+                  similar: list[str] | None = None) -> str:
+    """Post-write confirmation: the action is already on the board."""
     name = card.get("name", task.title)
-    return f"Done: '{name}' updated in Trello."
+    verb = "created" if task.action.value == "create" else "updated"
+    msg = f"Done: '{name}' {verb} in Trello."
+    if similar:
+        msg += ("\nHeads-up: similar task(s) found: "
+                + "; ".join(similar)
+                + ". Check whether this is a duplicate.")
+    return msg
 
 
 def render_write_error(task: Task, error: Exception) -> str:
     return (f"Sorry, I could not write "
             f"'{task.title or task.action.value}' to Trello ({error}). "
             f"It was NOT created - please send the task again.")
+
+
+def render_invalid(task: Task, error: ValueError) -> str:
+    return (f"Sorry, I could not build a valid {task.action.value} action "
+            f"from that message ({error}). Please send it again with "
+            f"the missing details.")
+
+
+def render_error(error: Exception) -> str:
+    return (f"Sorry, something went wrong handling that message ({error}). "
+            f"Nothing was written - please try again.")
+
+
+def render_chat(task: Task) -> str:
+    """Free-text conversational reply chosen by the LLM."""
+    return task.reply.strip() or "I'm here - what would you like me to do?"
 
 
 def render_clarification(question: str) -> str:

@@ -49,6 +49,10 @@ async def scheduler(pipeline) -> None:
 
 
 async def main_async() -> None:
+    import logging
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
     from app.config import settings
     from app.confirm.pending import PendingService
     from app.gateway.onboarding import Onboarding

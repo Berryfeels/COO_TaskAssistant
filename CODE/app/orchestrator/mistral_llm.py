@@ -13,6 +13,7 @@ Config: MISTRAL_API_KEY, MISTRAL_MODEL (default mistral-small-latest).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -22,16 +23,22 @@ from ..config import settings
 from ..schema import Action, Clarification, Task
 from ..trello.client import TrelloLike
 
+log = logging.getLogger(__name__)
+
 API_URL = "https://api.mistral.ai/v1/chat/completions"
 
-SYSTEM_PROMPT = """You are the task-management assistant of a COO team.
-The user may write in any language (typically English or Italian): understand
-any language and ask any clarifying question in the user's language, but
-ALWAYS write the card content (title, description) in English.
-Every user message contains either a NEW task or a
-MODIFICATION of an existing task. Return ONLY a JSON object with these fields:
-action (create|update|complete|move_date|archive|query), target_card_id (null
-for create), title (in English; if the user does not state a title, generate
+SYSTEM_PROMPT = """You manage the
+team's tasks on Trello. You are the FIRST to read every user message and
+you own the conversation, which is free: greetings, small talk and general
+questions are normal and are answered naturally. The user may write in any
+language, reply in the same language but ALWAYS write the
+card content in English.
+A user message is free conversation OR a NEW task OR a MODIFICATION of an
+existing task. Return ONLY a JSON object with these fields:
+action (create|update|complete|move_date|archive|query|chat), reply (your
+free-text answer in the user's language; required and only used for action
+"chat"; never force a task when the user is only talking), target_card_id
+(null for create), title (in English; if the user does not state a title, generate
 a short English title from the request), description (in English; collect
 there every other useful detail - constraints, contact person with email and
 phone, location, notes - and translate EVERY word to English, e.g. Italian
@@ -50,7 +57,25 @@ label IDs), confidence (0-1), source_message_id.
 If anything is ambiguous (several cards match, unknown person, incomplete
 or inconsistent date), set confidence below 0.7 and add a "question" field
 with ONE short clarifying question. Never invent card or member IDs: use the
-tools to resolve them. Today is {today} ({weekday}, Europe/Berlin).
+tools to resolve them. Every modify action (update|move_date|complete|
+archive) MUST carry a real target_card_id: ALWAYS call board_cards first and
+match the user's task description against the card names to resolve it.
+Returning a modify action without calling board_cards is never acceptable -
+if no card matches, set confidence below 0.7 and ask which task is meant.
+A modification without an extractable change is never
+valid: for move_date the NEW date goes in due; for update at least one of
+title, description, due, list_id, assignees, done, closed must change. If
+you cannot extract the change, set confidence below 0.7 and ask for it
+instead of returning the action.
+For action update, return ONLY the fields the user wants to change and
+leave every other field null/empty - empty means "leave unchanged". NEVER
+derive the title from the user's request: if the user does not explicitly
+ask to rename, return title null. To add a note or information to a task,
+call get_card on the target first and return description = the EXISTING
+description with the new note APPENDED to it (in English, as a clear
+instruction like "make it black and white") - never a paraphrase of the
+user's whole request, never a replacement of what is already there.
+Today is {today} ({weekday}, Europe/Berlin).
 """
 
 _TOOLS = [
@@ -80,10 +105,13 @@ _TOOLS = [
 
 
 class MistralLLM:
+    MAX_HISTORY = 12                     # remembered turns per user
+
     def __init__(self, api_key: str | None = None,
                  model: str | None = None):
         self.api_key = api_key or settings.mistral_api_key
         self.model = model or "mistral-small-latest"
+        self._history: dict[str, list[dict]] = {}   # per-user conversation
 
     # -- API plumbing ---------------------------------------------------------
     def _complete(self, messages: list[dict]) -> dict:
@@ -117,10 +145,15 @@ class MistralLLM:
     def interpret(self, text: str, user: dict, trello: TrelloLike) -> Task:
         tz = ZoneInfo(settings.timezone)
         today = datetime.now(tz)
+        # free conversation: the user's previous turns are part of the
+        # context, so greetings and follow-ups read naturally
+        user_id = str(user.get("user_id", ""))
+        history = self._history.setdefault(user_id, [])
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT.format(
                 today=today.date().isoformat(),
                 weekday=today.strftime("%A"))},
+            *history[-self.MAX_HISTORY:],
             {"role": "user", "content": text},
         ]
 
@@ -128,6 +161,11 @@ class MistralLLM:
             msg = self._complete(messages)
             calls = msg.get("tool_calls") or []
             if not calls:
+                # remember the exchange for the next message
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant",
+                                "content": msg["content"]})
+                del history[:-self.MAX_HISTORY]
                 return self._parse(msg["content"], user, today)
             messages.append(msg)
             for call in calls:
@@ -144,6 +182,16 @@ class MistralLLM:
     def _parse(self, content: str, user: dict, today: datetime) -> Task:
         m = re.search(r"\{.*\}", content, re.S)
         if not m:
+            # The model sometimes answers free conversation in plain prose
+            # (no JSON envelope). The prose IS the chat reply: deliver it
+            # instead of rejecting it with a canned error.
+            text = content.strip()
+            if text:
+                log.info("LLM answered in free text; treating as chat")
+                return Task(action=Action.chat, reply=text,
+                            source_message_id=str(
+                                user.get("source_message_id", "")))
+            log.warning("LLM sent neither JSON nor text")
             raise Clarification("I did not understand. Can you rephrase?")
         data = json.loads(m.group(0))
 
@@ -155,4 +203,6 @@ class MistralLLM:
         if question:
             task.confidence = min(task.confidence, 0.5)
             raise Clarification(question)
+        log.info("LLM -> %s (confidence %.2f)", task.action.value,
+                 task.confidence)
         return task

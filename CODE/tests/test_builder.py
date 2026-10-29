@@ -56,7 +56,28 @@ class TestRenderConfirmation(unittest.TestCase):
 class TestRenderOutcome(unittest.TestCase):
     def test_result_prefers_card_name(self):
         msg = builder.render_result(task(), {"name": "Renamed on board"})
-        self.assertEqual(msg, "Done: 'Renamed on board' updated in Trello.")
+        self.assertIn("'Renamed on board'", msg)
+
+    def test_result_says_created_for_create(self):
+        msg = builder.render_result(task(), {"name": "Call supplier"})
+        self.assertEqual(msg, "Done: 'Call supplier' created in Trello.")
+
+    def test_result_says_updated_for_other_actions(self):
+        msg = builder.render_result(
+            task(action=Action.move_date, title="", target_card_id="c1",
+                 due="2026-11-01T10:00:00+01:00"), {"name": "Call supplier"})
+        self.assertEqual(msg, "Done: 'Call supplier' updated in Trello.")
+
+    def test_result_similar_appended_as_heads_up(self):
+        msg = builder.render_result(
+            task(), {"name": "Call supplier"},
+            similar=["'Call the supplier' (already on the board)"])
+        self.assertIn("Heads-up: similar task(s) found:", msg)
+        self.assertIn("already on the board", msg)
+
+    def test_result_without_similar_has_no_heads_up(self):
+        msg = builder.render_result(task(), {"name": "Call supplier"})
+        self.assertNotIn("Heads-up", msg)
 
     def test_write_error_says_not_created(self):
         msg = builder.render_write_error(task(), RuntimeError("HTTP 400"))

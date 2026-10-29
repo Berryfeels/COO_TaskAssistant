@@ -13,6 +13,7 @@ class Action(str, Enum):
     move_date = "move_date"
     archive = "archive"
     query = "query"
+    chat = "chat"
 
 
 WRITE_ACTIONS = {Action.create, Action.update, Action.complete,
@@ -41,6 +42,7 @@ class Task:
     list_id: Optional[str] = None             # idList
     labels: list[str] = field(default_factory=list)      # idLabels
     confidence: float = 1.0
+    reply: str = ""                        # free-text answer (action chat)
     source_message_id: str = ""
 
     MIN_CONFIDENCE = 0.7
@@ -53,11 +55,24 @@ class Task:
     def is_write(self) -> bool:
         return self.action in WRITE_ACTIONS
 
+    @property
+    def has_change(self) -> bool:
+        """Whether this task carries at least one field to write."""
+        return bool(self.title or self.description or self.due is not None
+                    or self.list_id or self.assignees or self.done
+                    or self.closed)
+
     def validate(self) -> None:
         if self.is_write and self.action != Action.create and not self.target_card_id:
             raise ValueError(f"{self.action.value} requires target_card_id")
         if self.action == Action.create and not self.title:
             raise ValueError("create requires a title")
+        if self.action == Action.move_date and self.due is None:
+            raise ValueError("move_date requires the new due date")
+        if self.action == Action.update and not self.has_change:
+            raise ValueError("update requires a field to change (title, "
+                             "description, due date, list, assignees, "
+                             "done or closed)")
 
     @classmethod
     def from_card(cls, card: dict) -> "Task":

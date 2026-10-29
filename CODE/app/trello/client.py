@@ -65,9 +65,9 @@ class TrelloClient:
         params: dict = {"name": task.title, "desc": task.description}
         if task.due is not None:
             params["due"] = task.due
-        if task.action == Action.complete:
+        if task.action == Action.complete or task.done:
             params["dueComplete"] = "true"
-        if task.action == Action.archive:
+        if task.action == Action.archive or task.closed:
             params["closed"] = "true"
         if task.list_id:
             params["idList"] = task.list_id
@@ -127,9 +127,9 @@ class FakeTrello:
             card["desc"] = task.description
         if task.due is not None:
             card["due"] = task.due
-        if task.action == Action.complete:
+        if task.action == Action.complete or task.done:
             card["dueComplete"] = True
-        if task.action == Action.archive:
+        if task.action == Action.archive or task.closed:
             card["closed"] = True
         if task.list_id:
             card["idList"] = task.list_id

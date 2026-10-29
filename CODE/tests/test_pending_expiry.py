@@ -1,5 +1,3 @@
-import time
-
 from app.config import Settings
 from tests.base import BaseCase, make_pipeline, run
 
@@ -20,11 +18,16 @@ class TestPendingExpiry(BaseCase):
         self.assertEqual(self.pending.active(self.user), [])
         self.assertEqual(self.db.pending_get(pid), None)
 
-    def test_no_card_written_if_expired(self):
-        self.say("m1", "create task 'Call supplier' for marco")
-        t0 = time.time()
+    def test_expired_pending_writes_no_card(self):
+        # legacy pendings (created before the confirmation loop was
+        # removed) still expire without ever touching Trello
+        t0 = 1000.0
+        from app.schema import Action, Task
+        task = Task(action=Action.create, title="Call supplier")
+        self.db.pending_save(self.user, task, t0)
         run(self.pipe.expiry_job(now=t0 + 25 * 3600))
         self.assertEqual(len(self.trello.cards), 0)
+        self.assertEqual(self.pending.active(self.user), [])
 
 
 class TestReminders(BaseCase):
