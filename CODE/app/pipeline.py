@@ -1,12 +1,13 @@
-"""Core pipeline: FIFO ingestion, interpretation, confirmation loop, writes.
+"""Core pipeline: FIFO ingestion, interpretation, immediate writes.
 
 Implements spec 9.1 with the agreed semantics:
 - FIFO per user applies to ingestion only; every message is an independent
-  pending process (no blocking, no superseding).
-- mark_processed(msg.id) means "this message has been handled"; it is called
-  in the same transaction as pending_save / after sending a clarification,
-  and again after a confirmation is applied. It never implies the action
-  was executed (spec 5.2).
+  process (no blocking, no superseding).
+- Since 2026-10-29 there is no confirmation loop: write actions are applied
+  immediately and the bot only confirms the outcome. The confirmation
+  matching below remains only to drain pendings created before the change.
+- mark_processed(msg.id) means "this message has been handled"; it never
+  implies the action was executed (spec 5.2).
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 
 from .config import Settings
-from .confirm.pending import PendingDecision, PendingService
+from .confirm.pending import PendingService
 from .notify import builder
 from .orchestrator.agent import LLMProvider
 from .schema import Action, Clarification, Task
@@ -79,29 +80,58 @@ class Pipeline:
             await self.gateway.send(user_id, builder.render_ambiguous(decision.active))
             return
 
-        # 2. New instruction: interpret (LLM + Trello read tools).
+        # 2. The LLM owns the conversation: interpret with per-user
+        #    history (greetings/chat are answered freely by the model).
         try:
-            task = self.llm.interpret(text, {"source_message_id": message_id},
-                                      self.trello)
+            task = self.llm.interpret(
+                text, {"source_message_id": message_id, "user_id": user_id},
+                self.trello)
         except Clarification as c:
             self.db.mark_processed(message_id)          # question sent, no pending
             await self.gateway.send(user_id, builder.render_clarification(c.question))
             return
-
-        # 3. Queries are read-only: answer immediately, no pending.
-        if task.action == Action.query:
+        except Exception as e:
+            # API/network failure: without this the user gets silence
+            # (the gateway catches the exception and only logs it)
             self.db.mark_processed(message_id)
-            await self._answer_query(user_id, task)
+            await self.gateway.send(user_id, builder.render_error(e))
             return
 
-        # 4. Write action: validate, save pending, mark processed (same
-        #    transaction semantics, spec 5.2), ask for confirmation.
-        task.validate()
+        # 3. Free conversation: answer directly, nothing happens on the board.
+        if task.action == Action.chat:
+            self.db.mark_processed(message_id)
+            await self.gateway.send(user_id, builder.render_chat(task))
+            return
+
+        # 4. Queries are read-only: answer immediately.
+        if task.action == Action.query:
+            await self._answer_query(user_id, task)
+            self.db.mark_processed(message_id)  # after the reply: a crash
+            return                             # keeps the message retryable
+
+        # 5. Write action: validate, apply immediately, confirm the
+        #    outcome. No confirmation loop (spec change 2026-10-29): the
+        #    action lands on the board right away and the bot only reports.
+        try:
+            task.validate()
+        except ValueError as e:
+            # an action with no real change (e.g. move_date without a new
+            # date) would be applied as a Trello no-op and reported as done:
+            # reject it here and tell the user instead of crashing silently
+            self.db.mark_processed(message_id)
+            await self.gateway.send(user_id, builder.render_invalid(task, e))
+            return
         similar = self._similar_tasks(user_id, task)
-        pending_id = self.pending.save(user_id, task, time.time())
-        self.db.mark_processed(message_id)              # NOT an execution
+        try:
+            result = self.trello.apply(task)          # the only Trello write
+        except Exception as e:
+            self.db.mark_processed(message_id)
+            await self.gateway.send(
+                user_id, builder.render_write_error(task, e))
+            return
+        self.db.mark_processed(message_id)
         await self.gateway.send(
-            user_id, builder.render_confirmation(pending_id, task, similar))
+            user_id, builder.render_result(task, result, similar))
 
     def _similar_tasks(self, user_id: str, task: Task) -> list[str]:
         """Near-duplicate guard: message-ID idempotency (spec 5.2) cannot
@@ -123,7 +153,9 @@ class Pipeline:
         return hits
 
     async def _answer_query(self, user_id: str, task: Task) -> None:
-        cards = self.trello.search_cards("") or []
+        # board_cards(), not search_cards(""): Trello's /1/search rejects an
+        # empty query with HTTP 400 and its index lags behind anyway
+        cards = self.trello.board_cards() or []
         open_cards = [c for c in cards if not c.get("closed")]
         if not open_cards:
             await self.gateway.send(user_id, "You have no open tasks.")

@@ -98,7 +98,11 @@ class SimpleXGateway(Gateway):
         if not isinstance(msg, dict):
             return
         if "corrId" in msg:                     # response to our own command
-            log.debug("SimpleX: response %s", msg)
+            resp = msg.get("resp") or {}
+            if isinstance(resp, dict) and resp.get("type") == "error":
+                log.warning("SimpleX: command failed: %s", resp)
+            else:
+                log.debug("SimpleX: response %s", msg)
             return
         # server-initiated event: {"resp": {...}} without corrId
         ev = msg.get("resp") if isinstance(msg.get("resp"), dict) else msg
@@ -115,6 +119,7 @@ class SimpleXGateway(Gateway):
         if self.pipeline is None:
             return
         for user_id, message_id, text in self._extract_incoming(ev):
+            log.info("recv [%s] from %s: %r", message_id, user_id, text)
             try:
                 if self.admit is not None and not await self.admit(
                         user_id, message_id, text):
@@ -172,6 +177,7 @@ class SimpleXGateway(Gateway):
         is "@<name> <message>" (verified against v7.0.0.12).
         """
         await super().send(user_id, text)       # in-memory record (tests)
+        log.info("send to %s: %r", user_id, text)
         ws = self._ws
         if ws is None:
             log.error("SimpleX: not connected, reply dropped: %r", text)

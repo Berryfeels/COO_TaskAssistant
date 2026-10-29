@@ -61,9 +61,14 @@ class TestParse(unittest.TestCase):
         self.assertEqual(task.action, Action.archive)
         self.assertEqual(task.target_card_id, "card1")
 
-    def test_missing_json_raises_clarification(self):
+    def test_plain_prose_becomes_a_chat_reply(self):
+        task = self.parse("I have no idea what you mean.")
+        self.assertEqual(task.action, Action.chat)
+        self.assertEqual(task.reply, "I have no idea what you mean.")
+
+    def test_empty_answer_raises_clarification(self):
         with self.assertRaises(Clarification):
-            self.parse("I have no idea what you mean.")
+            self.parse("   ")
 
     def test_question_raises_clarification_with_that_text(self):
         with self.assertRaises(Clarification) as ctx:
@@ -83,6 +88,12 @@ class TestParse(unittest.TestCase):
     def test_missing_action_defaults_to_query(self):
         task = self.parse('{"title": "whatever"}')
         self.assertEqual(task.action, Action.query)
+
+    def test_chat_action_keeps_free_reply(self):
+        task = self.parse('{"action": "chat",'
+                          ' "reply": "Ciao! Come posso aiutarti?"}')
+        self.assertEqual(task.action, Action.chat)
+        self.assertEqual(task.reply, "Ciao! Come posso aiutarti?")
 
 
 class TestCallTool(unittest.TestCase):
@@ -173,3 +184,32 @@ class TestInterpretLoop(unittest.TestCase):
                                   trello)
         self.assertEqual(task.action, Action.create)
         self.assertEqual(trello.cards, {})   # no reads, no writes
+
+    def test_conversation_history_is_per_user(self):
+        calls = []
+
+        def fake_complete(messages):
+            calls.append(messages)
+            return {"content": '{"action": "chat", "reply": "Ciao!"}'}
+
+        self.llm._complete = fake_complete
+        self.llm.interpret("ciao", {"user_id": "u1"}, FakeTrello())
+        self.llm.interpret("come stai?", {"user_id": "u1"}, FakeTrello())
+        # the second call saw the first exchange as context
+        self.assertEqual(calls[1][1], {"role": "user", "content": "ciao"})
+        self.assertEqual(calls[1][2],
+                         {"role": "assistant",
+                          "content": '{"action": "chat", "reply": "Ciao!"}'})
+        self.assertEqual(calls[1][3],
+                         {"role": "user", "content": "come stai?"})
+        # another user starts with a clean history
+        self.llm.interpret("hello", {"user_id": "u2"}, FakeTrello())
+        self.assertEqual(len(calls[2]), 2)   # system + user only
+
+    def test_history_is_capped(self):
+        self.llm._complete = lambda messages: {
+            "content": '{"action": "chat", "reply": "ok"}'}
+        for i in range(10):
+            self.llm.interpret(f"msg {i}", {"user_id": "u1"}, FakeTrello())
+        self.assertLessEqual(len(self.llm._history["u1"]),
+                            self.llm.MAX_HISTORY)
