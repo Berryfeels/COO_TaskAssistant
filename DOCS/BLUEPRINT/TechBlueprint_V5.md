@@ -4,6 +4,37 @@ Spec plus architecture, Trello integration details, tool list and project skelet
 
 **Changes in V5:** multilingual input policy (any input language, card content in English), task field distribution rules (auto-generated title, responsible member, date+time in due, details in description), and the near-duplicate guard for reworded task repeats (section 5.4).
 
+<details open>
+<summary><strong>Index</strong> — click a section to jump to it; collapse this block to hide it</summary>
+
+- [1. Description](#1-description)
+- [2. Architecture and agent list](#2-architecture-and-agent-list)
+  - [2.1 Components](#21-components)
+  - [2.2 Flow](#22-flow)
+  - [2.3 Structure](#23-structure)
+- [3. List of event triggers](#3-list-of-event-triggers)
+- [4. Task object (mirrors a Trello card)](#4-task-object-mirrors-a-trello-card)
+- [5. Confirmation and pending actions](#5-confirmation-and-pending-actions)
+  - [5.1 Pending lifecycle](#51-pending-lifecycle)
+  - [5.2 Idempotency and mark_processed semantics](#52-idempotency-and-mark_processed-semantics)
+  - [5.3 Concurrency: FIFO](#53-concurrency-fifo)
+  - [5.4 Near-duplicate guard (reworded repeats)](#54-near-duplicate-guard-reworded-repeats)
+- [6. Trello integration: can everything go through the API?](#6-trello-integration-can-everything-go-through-the-api)
+  - [6.1 Authentication](#61-authentication)
+  - [6.2 Editing tasks](#62-editing-tasks)
+  - [6.3 Incoming events (Trello to the system): webhooks](#63-incoming-events-trello-to-the-system-webhooks)
+  - [6.4 Limits to design around](#64-limits-to-design-around)
+- [7. Tech list](#7-tech-list)
+- [8. Requirements (decisions)](#8-requirements-decisions)
+- [9. Project skeleton](#9-project-skeleton)
+  - [9.1 Core data flow in code (outline)](#91-core-data-flow-in-code-outline)
+  - [9.2 Suggested build order](#92-suggested-build-order)
+- [10. Run and clean shutdown](#10-run-and-clean-shutdown)
+  - [10.1 Start](#101-start)
+  - [10.2 Clean shutdown](#102-clean-shutdown)
+
+</details>
+
 ## 1. Description
 
 The agent automates team task management. The worker interacts with a bot as his/her assistant. Through audio or text input, the agent sets a new task, monitors it and manages it.
@@ -274,3 +305,31 @@ async def pending_expiry_job():                 # periodic
 5. Whisper transcription for audio (English only).
 6. Webhook receiver, loop prevention and notifications for human edits.
 7. kDrive archive, GDPR retention rules, deployment and monitoring.
+
+## 10. Run and clean shutdown
+
+### 10.1 Start
+
+1. Start the SimpleX Chat CLI with the WebSocket API enabled (one process, keeps running):
+
+   ```bash
+   simplex-chat -d ~/.simplex/coo-bot.db -p 5225 --user-display-name "COO Assistant"
+   ```
+
+   `-p 5225` is the chat server port the bot connects to; `-d` is the CLI database prefix.
+
+2. With `CODE/.env` configured (Trello, Mistral, `SIMPLEX_WS_URL`), start the bot:
+
+   ```bash
+   cd CODE
+   python3 scripts/run_bot.py
+   ```
+
+The bot connects to `SIMPLEX_WS_URL` (default `ws://127.0.0.1:5225`), restores persisted state from `DATABASE_PATH` (default `coo.db`: onboarded contacts, processed message IDs, pending actions), and runs an hourly loop for pending reminders and 24h expiry. Do not attach a second WebSocket client to the same simplex-chat port while the bot is running: the CLI delivers each chat event to one client only, so a debug listener would steal events from the bot.
+
+### 10.2 Clean shutdown
+
+1. **Stop the bot first**: send SIGINT (Ctrl+C in its terminal, or `kill <pid>`). `scripts/run_bot.py` catches `KeyboardInterrupt`, prints "COO assistant stopped." and exits with code 0. All state is committed to SQLite at each step, so stopping at any point loses nothing — on the next start the bot resumes from the persisted DB.
+2. **Then stop `simplex-chat`** (Ctrl+C or `pkill -f simplex-chat`).
+
+Order matters: stop the bot before the SimpleX CLI, so no incoming message is left half-processed between gateway and pipeline.
