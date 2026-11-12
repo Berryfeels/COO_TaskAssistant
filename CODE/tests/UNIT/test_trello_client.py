@@ -1,14 +1,12 @@
 """Offline tests for the real TrelloClient: exact HTTP requests it builds
-(method, path, auth params, default-list fallback, lazy board-ID resolution).
-
-FakeTrello is covered implicitly everywhere else; these pin the REST wrapper.
-No network: urllib.request.urlopen is stubbed.
+(method, path, auth params, default-list fallback, lazy board-ID resolution,
+create_list request). No network: urllib.request.urlopen is stubbed.
 """
 import json
 import unittest
 from unittest import mock
 
-from app.schema import Action, Task
+from app.schema import Action, Card
 from app.trello.client import TrelloClient
 
 
@@ -63,10 +61,10 @@ def query(req):
 
 class TestCreateCard(unittest.TestCase):
     def test_create_falls_back_to_default_list(self):
-        task = Task(action=Action.create, title="Call supplier",
+        card = Card(action=Action.add_card, title="Call supplier",
                     description=None, due=None, assignees=["m1"], labels=[])
         with stub({"id": "c1"}) as up:
-            client().create_card(task)
+            client().create_card(card)
         req = up.requests[0]
         self.assertEqual(req.method, "POST")
         self.assertTrue(req.full_url.startswith(
@@ -83,9 +81,9 @@ class TestCreateCard(unittest.TestCase):
         self.assertNotIn("idLabels=", q)
 
     def test_explicit_list_id_wins_over_default(self):
-        task = Task(action=Action.create, title="X", list_id="Lnamed")
+        card = Card(action=Action.add_card, title="X", list_id="Lnamed")
         with stub({"id": "c1"}) as up:
-            client().create_card(task)
+            client().create_card(card)
         q = query(up.requests[0])
         self.assertIn("idList=Lnamed", q)
         self.assertNotIn("idList=Ldefault", q)
@@ -93,10 +91,10 @@ class TestCreateCard(unittest.TestCase):
 
 class TestUpdateCard(unittest.TestCase):
     def test_update_sends_name_and_desc(self):
-        task = Task(action=Action.update, target_card_id="card7",
+        card = Card(action=Action.update, target_card_id="card7",
                     title="New name", description="New desc")
         with stub({"id": "card7"}) as up:
-            client().update_card(task)
+            client().update_card(card)
         req = up.requests[0]
         self.assertEqual(req.method, "PUT")
         self.assertTrue(req.full_url.endswith("/cards/card7") or
@@ -108,27 +106,56 @@ class TestUpdateCard(unittest.TestCase):
         self.assertNotIn("due=", q)          # due None -> not sent
 
     def test_complete_sets_due_complete(self):
-        task = Task(action=Action.complete, target_card_id="card7", due=None)
+        card = Card(action=Action.complete, target_card_id="card7", due=None)
         with stub({}) as up:
-            client().update_card(task)
+            client().update_card(card)
         self.assertIn("dueComplete=true", query(up.requests[0]))
 
     def test_archive_sets_closed(self):
-        task = Task(action=Action.archive, target_card_id="card7")
+        card = Card(action=Action.archive, target_card_id="card7")
         with stub({}) as up:
-            client().update_card(task)
+            client().update_card(card)
         self.assertIn("closed=true", query(up.requests[0]))
 
     def test_move_and_assignees_are_forwarded(self):
-        task = Task(action=Action.move_date, target_card_id="card7",
+        card = Card(action=Action.move_date, target_card_id="card7",
                     due="2026-11-01T10:00:00+01:00",
                     list_id="L2", assignees=["m1", "m2"])
         with stub({}) as up:
-            client().update_card(task)
+            client().update_card(card)
         q = query(up.requests[0])
         self.assertIn("due=2026-11-01T10", q)
         self.assertIn("idList=L2", q)
         self.assertIn("idMembers=m1%2Cm2", q)
+
+
+class TestCreateList(unittest.TestCase):
+    def test_create_list_posts_to_lists_with_board_and_name(self):
+        c = client()
+        responses = [{"id": "full24charboardid00001"},   # lazy board resolution
+                     {"id": "Lnew1", "name": "Review"}]   # POST /lists result
+        with stub(*responses) as up:
+            new_list = c.create_list("Review")
+        req = up.requests[1]
+        self.assertEqual(req.method, "POST")
+        self.assertIn("/lists", req.full_url)
+        q = query(req)
+        self.assertIn("idBoard=full24charboardid00001", q)
+        self.assertIn("name=Review", q)
+        self.assertIn("key=k", q)
+        self.assertIn("token=t", q)
+        self.assertEqual(new_list["id"], "Lnew1")
+
+    def test_apply_routes_add_list_to_create_list(self):
+        c = client()
+        card = Card(action=Action.add_list, title="Blocked")
+        responses = [{"id": "full24charboardid00001"}, {"id": "L9", "name": "Blocked"}]
+        with stub(*responses) as up:
+            result = c.apply(card)
+        self.assertEqual(up.requests[1].method, "POST")
+        self.assertIn("/lists", up.requests[1].full_url)
+        self.assertIn("name=Blocked", query(up.requests[1]))
+        self.assertEqual(result["id"], "L9")
 
 
 class TestBoardIdResolution(unittest.TestCase):
@@ -179,3 +206,20 @@ class TestBoardIdResolution(unittest.TestCase):
         self.assertIn("/boards/full24charboardid00001/members",
                       up.requests[2].full_url)
         self.assertEqual(members[0]["fullName"], "Marco")
+
+    def test_list_lists_uses_full_board_id(self):
+        c = client()
+        responses = [{"id": "full24charboardid00001"},   # lazy resolution
+                     [{"id": "Ltodo", "name": "To-do"},
+                      {"id": "Ldoing", "name": "Doing"},
+                      {"id": "Ldone", "name": "Done 🎉"}]]
+        with stub(*responses) as up:
+            lists = c.list_lists()
+        req = up.requests[1]
+        self.assertEqual(req.method, "GET")
+        self.assertIn("/boards/full24charboardid00001/lists", req.full_url)
+        q = query(req)
+        self.assertIn("fields=id", q)
+        self.assertIn("name", q)
+        self.assertEqual([l["id"] for l in lists],
+                         ["Ltodo", "Ldoing", "Ldone"])

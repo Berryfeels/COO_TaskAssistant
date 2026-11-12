@@ -1,12 +1,18 @@
-"""Mistral LLM Orchestrator: intent + extraction with tool use (spec 2.1).
+"""Mistral LLM Orchestrator: the LLM speaks in plain words, a parser fills
+the JSON (spec 2.1 steps 3-4).
 
 Uses the Mistral API (chat completions with function calling) through the
-standard library only - no SDK dependency. The model gets the same Trello
-read tools as every other implementation of LLMProvider:
+standard library only - no SDK dependency. The model gets the Trello read
+tools:
 
-    search_cards(query) | get_card(card_id) | list_members()
+    board_cards() | search_cards(query) | get_card(card_id) |
+    list_members() | list_lists()
 
-and must answer with the Task object as JSON (spec section 4).
+and answers with PLAIN WORDS ONLY - never JSON: either free prose (chat) or
+one labelled line per field (action:, title:, card:, assign:, due:, list:,
+note:, question:). WordParser (parser.py) is the deterministic program logic
+that turns those words into the Card JSON, resolving names to Trello IDs and
+relative dates to ISO datetimes. The LLM itself never handles IDs.
 
 Config: MISTRAL_API_KEY, MISTRAL_MODEL (default mistral-small-latest).
 """
@@ -14,67 +20,63 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ..config import settings
-from ..schema import Action, Clarification, Task
+from ..schema import Clarification, Card
 from ..trello.client import TrelloLike
+from .parser import WordParser
 
 log = logging.getLogger(__name__)
 
 API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 SYSTEM_PROMPT = """You manage the
-team's tasks on Trello. You are the FIRST to read every user message and
+team's cards on Trello. You are the FIRST to read every user message and
 you own the conversation, which is free: greetings, small talk and general
 questions are normal and are answered naturally. The user may write in any
-language, reply in the same language but ALWAYS write the
-card content in English.
-A user message is free conversation OR a NEW task OR a MODIFICATION of an
-existing task. Return ONLY a JSON object with these fields:
-action (create|update|complete|move_date|archive|query|chat), reply (your
-free-text answer in the user's language; required and only used for action
-"chat"; never force a task when the user is only talking), target_card_id
-(null for create), title (in English; if the user does not state a title, generate
-a short English title from the request), description (in English; collect
-there every other useful detail - constraints, contact person with email and
-phone, location, notes - and translate EVERY word to English, e.g. Italian
-"maestra" becomes "teacher"), assignees (Trello member IDs of the
-responsible person: in "X must do Y" the subject X is ALWAYS the responsible
-member - ALWAYS call list_members and match X against the members' full
-names by first name (e.g. "Stefano" matches "Stefano Di Puma") BEFORE asking
-anything; put the member ID in assignees whenever the person is on the
-board; only ask a clarifying question if no member matches), due
-(ISO 8601 date AND time when a time is given, with
-the explicit Europe/Berlin UTC offset, e.g. "2026-11-17T08:00:00+01:00"),
-done (bool), list_id (null for create unless the user names a column; the system places
-new cards in the default list - never guess or invent a list ID),
-labels (always [] for now: label resolution is not implemented, never invent
-label IDs), confidence (0-1), source_message_id.
-If anything is ambiguous (several cards match, unknown person, incomplete
-or inconsistent date), set confidence below 0.7 and add a "question" field
-with ONE short clarifying question. Never invent card or member IDs: use the
-tools to resolve them. Every modify action (update|move_date|complete|
-archive) MUST carry a real target_card_id: ALWAYS call board_cards first and
-match the user's task description against the card names to resolve it.
-Returning a modify action without calling board_cards is never acceptable -
-if no card matches, set confidence below 0.7 and ask which task is meant.
-A modification without an extractable change is never
-valid: for move_date the NEW date goes in due; for update at least one of
-title, description, due, list_id, assignees, done, closed must change. If
-you cannot extract the change, set confidence below 0.7 and ask for it
-instead of returning the action.
-For action update, return ONLY the fields the user wants to change and
-leave every other field null/empty - empty means "leave unchanged". NEVER
-derive the title from the user's request: if the user does not explicitly
-ask to rename, return title null. To add a note or information to a task,
-call get_card on the target first and return description = the EXISTING
-description with the new note APPENDED to it (in English, as a clear
-instruction like "make it black and white") - never a paraphrase of the
-user's whole request, never a replacement of what is already there.
+language; reply in the same language, but the words you write for card
+content (title, note) are ALWAYS in English.
+A user message is free conversation OR a change on the Trello board OR an
+enquiry about the board content.
+
+You NEVER output JSON, code blocks or markup. You answer with plain words
+only, and a parser in the program turns your words into the action. For a
+board action, write one labelled line per field, using these labels exactly:
+
+  action: one of "add card" | "add column" | "update card" | "mark done" |
+          "move date" | "archive card" | "show cards"
+  title:  the card title in English (for "add card", if the user does not
+          state one, write a short English title yourself)
+  card:   which existing card you mean, as the user described it (only for
+          "update card" / "mark done" / "move date" / "archive card")
+  assign: the responsible people, comma separated, as the user named them
+          (in "X must do Y" the subject X is ALWAYS the responsible person)
+  due:    when: an ISO date or plain words like "tomorrow", "Friday",
+          "next Tuesday at 9:00"
+  list:   the column name as the user said it (To-do, Doing, Done, ...)
+  note:   every other useful detail, in English (constraints, contact person
+          with email and phone, location, times) - translate EVERY word to
+          English, e.g. Italian "maestra" becomes "teacher"
+  question: ONE short clarifying question, only when something is ambiguous
+
+Rules:
+- Give names exactly as the user said them (people, columns, cards). You do
+  NOT resolve Trello IDs and never invent them - the parser resolves the
+  names against the board.
+- Use the tools (board_cards, list_members, list_lists, search_cards,
+  get_card) to check which card, person or column the user means BEFORE
+  answering. If several match or none does, use one question: line.
+- "move X to Doing" / "mark X as done" / "sposta X in Doing": name the card
+  on the card: line and the column on the list: line.
+- For "update card" write only the fields that change (title, note, assign,
+  due, list). To add a note to a card, put on the note: line the EXISTING
+  description with the new note APPENDED (call get_card first) - never a
+  paraphrase of the whole request, never a replacement.
+- For pure conversation or general questions, answer with plain prose and no
+  labels at all - your words become the chat reply.
 Today is {today} ({weekday}, Europe/Berlin).
 """
 
@@ -101,6 +103,12 @@ _TOOLS = [
         "name": "list_members",
         "description": "List board members (id, fullName).",
         "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "list_lists",
+        "description": "List the board's columns/lists (id, name), e.g. To-do, "
+                       "Doing, Done. Use this to resolve a column NAME the user "
+                       "mentions to its real list ID for list_id.",
+        "parameters": {"type": "object", "properties": {}}}},
 ]
 
 
@@ -112,13 +120,14 @@ class MistralLLM:
         self.api_key = api_key or settings.mistral_api_key
         self.model = model or "mistral-small-latest"
         self._history: dict[str, list[dict]] = {}   # per-user conversation
+        self._parser = WordParser()   # words -> Card JSON (deterministic)
 
     # -- API plumbing ---------------------------------------------------------
     def _complete(self, messages: list[dict]) -> dict:
         # NOTE: response_format json_object must NOT be set here: combined
         # with tools it makes the model loop on tool calls without ever
         # emitting the final answer (observed on mistral-small-latest).
-        # _parse() extracts the JSON from the (possibly fenced) content.
+        # The final content is plain words; the parser fills the JSON.
         body = json.dumps({
             "model": self.model, "messages": messages,
             "tools": _TOOLS, "temperature": 0.2,
@@ -139,10 +148,12 @@ class MistralLLM:
             return trello.get_card(args.get("card_id", ""))
         if name == "list_members":
             return trello.list_members()
+        if name == "list_lists":
+            return trello.list_lists()
         raise ValueError(f"unknown tool {name}")
 
     # -- LLMProvider protocol -----------------------------------------------------
-    def interpret(self, text: str, user: dict, trello: TrelloLike) -> Task:
+    def interpret(self, text: str, user: dict, trello: TrelloLike) -> Card:
         tz = ZoneInfo(settings.timezone)
         today = datetime.now(tz)
         # free conversation: the user's previous turns are part of the
@@ -164,9 +175,13 @@ class MistralLLM:
                 # remember the exchange for the next message
                 history.append({"role": "user", "content": text})
                 history.append({"role": "assistant",
-                                "content": msg["content"]})
+                                "content": msg.get("content")})
                 del history[:-self.MAX_HISTORY]
-                return self._parse(msg["content"], user, today)
+                # the LLM spoke in words; the parser fills the Card JSON
+                card = self._parser.parse(msg.get("content") or "", user,
+                                          today, trello)
+                log.info("LLM words -> %s", card.action.value)
+                return card
             messages.append(msg)
             for call in calls:
                 fn = call["function"]
@@ -177,32 +192,3 @@ class MistralLLM:
                     "content": json.dumps(self._call_tool(fn["name"], args,
                                                           trello))})
         raise Clarification("I could not resolve that. Can you rephrase?")
-
-    # -- output parsing -----------------------------------------------------------
-    def _parse(self, content: str, user: dict, today: datetime) -> Task:
-        m = re.search(r"\{.*\}", content, re.S)
-        if not m:
-            # The model sometimes answers free conversation in plain prose
-            # (no JSON envelope). The prose IS the chat reply: deliver it
-            # instead of rejecting it with a canned error.
-            text = content.strip()
-            if text:
-                log.info("LLM answered in free text; treating as chat")
-                return Task(action=Action.chat, reply=text,
-                            source_message_id=str(
-                                user.get("source_message_id", "")))
-            log.warning("LLM sent neither JSON nor text")
-            raise Clarification("I did not understand. Can you rephrase?")
-        data = json.loads(m.group(0))
-
-        question = data.pop("question", None)
-        data["action"] = Action(data.get("action", "query"))
-        data.setdefault("source_message_id", user.get("source_message_id", ""))
-        task = Task(**{k: v for k, v in data.items()
-                       if k in Task.__dataclass_fields__})
-        if question:
-            task.confidence = min(task.confidence, 0.5)
-            raise Clarification(question)
-        log.info("LLM -> %s (confidence %.2f)", task.action.value,
-                 task.confidence)
-        return task

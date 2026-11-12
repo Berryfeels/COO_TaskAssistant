@@ -1,8 +1,8 @@
-"""Deterministic near-duplicate detection for task titles.
+"""Deterministic near-duplicate detection for card titles.
 
 Message-ID idempotency (spec 5.2) cannot catch a request the user re-sends
 with different wording: that is a new event. This module powers the
-pipeline-level guard that warns about it (see Pipeline._similar_tasks).
+pipeline-level guard that warns about it (see Pipeline._similar_cards).
 Purely deterministic on purpose: no LLM involved (design principle).
 """
 from __future__ import annotations

@@ -5,8 +5,7 @@ THE SOURCE OF REAL USER MESSAGES
 Until this module existed, every (user_id, message_id, text) triple the
 pipeline has ever seen was produced by TEST code: scripts like
 scripts/mistral_conversation_test.py and scripts/italian_scenario_test.py
-call pipeline.handle_incoming(...) directly, and the unit tests drive the
-same method through tests/base.py. Nothing in app/ produced messages.
+call pipeline.handle_incoming(...) directly. Nothing in app/ produced messages.
 
 SimpleXGateway.on_chat_event() below is the single point where a REAL
 SimpleX chat message becomes a pipeline input instead: an incoming chat
@@ -59,7 +58,7 @@ class SimpleXGateway(Gateway):
                  admit=None):
         """`admit(user_id, message_id, text) -> bool` is an optional gate
         that runs BEFORE the pipeline (used for onboarding: map a new
-        contact to a Trello member before they may give tasks)."""
+        contact to a Trello member before they may give cards)."""
         super().__init__()                      # keeps .sent for tests
         self.ws_url = ws_url
         self.pipeline = pipeline

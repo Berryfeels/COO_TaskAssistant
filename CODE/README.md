@@ -1,6 +1,6 @@
 # COO Assistant
 
-Voice/text assistant that manages team tasks in Trello via SimpleX Chat.
+Voice/text assistant that manages team cards in Trello via SimpleX Chat.
 Spec: see "COO Task Management Tool - Revised Specification v3".
 
 ## Design principles
@@ -10,17 +10,17 @@ Spec: see "COO Task Management Tool - Revised Specification v3".
 - Every event processed exactly once (message IDs stored).
 - FIFO per user for ingestion; each message is an independent pending process.
 - Input in any language; card content always in English.
-- A reworded repeat of a forgotten task is flagged in the confirmation with a
+- A reworded repeat of a forgotten card is flagged in the confirmation with a
   deterministic near-duplicate check (title similarity); it is never silently
   duplicated and never blocked - the user decides.
 
 ## Status of this build (build-order steps 1-4, plus the SimpleX gateway of step 3)
 
-1. Trello service (API wrapper, mockable) and Task schema.
-2. Orchestrator interface with card search and confirmation loop (LLM behind a Protocol; MockLLM for tests, MistralLLM for real runs).
+1. Trello service (API wrapper, mockable) and Card schema.
+2. Orchestrator interface with card search and confirmation loop (MistralLLM behind a Protocol).
 3. FIFO queue and pipeline (text input).
 4. Pending lifecycle: confirmations bound to pending_id, 24h expiry, 3 daytime reminders (07:00-02:00 Berlin, never 02:00-05:00), cancellation notice.
-5. Task field distribution via MistralLLM: any-language input, English card
+5. Card field distribution via MistralLLM: any-language input, English card
    content, auto-generated English title, sentence subject as responsible
    member, date+time with Berlin offset in `due`, details in `description`;
    near-duplicate guard over active pendings and open cards.
@@ -35,13 +35,13 @@ Not yet: Whisper audio, Trello webhooks, kDrive archive.
 
     app/
       config.py             settings from environment
-      schema.py             Task model (spec section 4)
+      schema.py             Card model (spec section 4)
       dates.py              relative date resolution, Europe/Berlin
       similarity.py         near-duplicate title guard (spec 5.4)
       storage/db.py         SQLite: users, processed, pending
       pipeline.py           handle_incoming / confirmation flow (spec 9.1)
       orchestrator/
-        agent.py            Orchestrator protocol + MockLLM (tests)
+        agent.py            LLMProvider protocol (MistralLLM is the implementation)
         mistral_llm.py      MistralLLM: real LLM via Mistral API (stdlib only);
                             any input language, English card content
       gateway/
@@ -51,7 +51,7 @@ Not yet: Whisper audio, Trello webhooks, kDrive archive.
       confirm/
         pending.py          save / pop / expire / reminders / cancel
       trello/
-        client.py           TrelloClient (REST) + FakeTrello for tests
+        client.py           TrelloClient (REST API wrapper)
       notify/
         builder.py          render_confirmation / result / reminder / cancelled
     scripts/
@@ -60,18 +60,21 @@ Not yet: Whisper audio, Trello webhooks, kDrive archive.
 
 ## Test against a real Trello sandbox board
 
-    export TRELLO_KEY=... TRELLO_TOKEN=... TRELLO_SANDBOX_LIST_ID=...
-    export TRELLO_SANDBOX_BOARD_ID=...   # recommended: scopes search to one board
+    export TRELLO_KEY=... TRELLO_TOKEN=... TRELLO_DEFAULT_LIST_ID=...
+    export TRELLO_BOARD_SANDBOX_ID=...   # recommended: scopes search to one board
     python3 scripts/trello_sandbox_test.py
 
+(The scripts load `CODE/.env` automatically; exporting is only needed to
+override what is already in `.env`.)
+
 Creates one test card, audits the mirror in both directions
-(Task -> card and card -> Task), moves the date, completes, archives,
+(Card model <-> Trello card dict via `from_api`/`to_api`), moves the date, completes, archives,
 searches, then deletes the card. Use a sandbox board, never production.
 
 ## Test a rich multilingual message end-to-end (real Mistral + Trello)
 
     export MISTRAL_API_KEY=... TRELLO_KEY=... TRELLO_TOKEN=...
-    export TRELLO_SANDBOX_BOARD_ID=... TRELLO_SANDBOX_LIST_ID=...
+    export TRELLO_BOARD_SANDBOX_ID=... TRELLO_DEFAULT_LIST_ID=...
     python3 scripts/italian_scenario_test.py
 
 Sends the Italian message "Stefano deve fare una torta per martedi 17
@@ -90,7 +93,7 @@ One-time: a local simplex-chat CLI with the WebSocket API enabled, e.g.
 
 Then, with `.env` configured (see below):
 
-    python3 scripts/run_bot.py
+    python3 CODE/scripts/run_bot.py
 
 Wires the real components with no mocks (SimpleXGateway <-> Pipeline <->
 MistralLLM <-> TrelloClient) and runs an hourly loop for pending reminders
@@ -106,11 +109,11 @@ a debug listener would steal events from the bot.
 
     python3 -m pytest tests/
 
-All tests are offline (FakeTrello, MockLLM, stubbed urlopen): pipeline and
-confirmation flow, pending lifecycle, idempotency, duplicates, date parsing,
-SimpleX event parsing and reconnect, contact onboarding, notification text,
-MistralLLM output parsing and tool loop, and the exact HTTP request shapes of
-TrelloClient and MistralLLM.
+The remaining tests are offline with stubbed urlopen only: date parsing and
+Card validation, notification text, SimpleX event parsing, and the exact HTTP
+request shapes of the real TrelloClient. Everything else is tested against
+the real services: Mistral LLM + real Trello board via the scripts in
+`scripts/` (see the usage notes in each script).
 
 ## Configure
 
@@ -119,8 +122,9 @@ TrelloClient and MistralLLM.
     # Trello
     TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID
     TRELLO_DEFAULT_LIST_ID                   # where creates land when no column is named
-    TRELLO_SANDBOX_BOARD_ID, TRELLO_SANDBOX_LIST_ID   # sandbox board used by
-                                                      # scripts/*_test.py
+    TRELLO_BOARD_SANDBOX_ID                  # sandbox board used by scripts/*_test.py;
+                                             # the bot itself (run_bot.py) runs on
+                                             # TRELLO_BOARD_ID
     # Mistral LLM
     MISTRAL_API_KEY, MISTRAL_MODEL
     # SimpleX gateway (used by scripts/run_bot.py)

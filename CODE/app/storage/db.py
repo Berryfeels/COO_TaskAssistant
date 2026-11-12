@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from ..schema import Action, Task
+from ..schema import Card, parse_action
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS processed (
 CREATE TABLE IF NOT EXISTS pending (
     pending_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    task_json TEXT NOT NULL,
+    card_json TEXT NOT NULL,
     created_at REAL NOT NULL,
     reminders_sent INTEGER NOT NULL DEFAULT 0,
     last_reminder_at REAL,
@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS queue (
     payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_queue_user ON queue(user_id, seq);
+CREATE TABLE IF NOT EXISTS lists (
+    list_id TEXT PRIMARY KEY,          -- Trello idList of the column
+    name TEXT NOT NULL,                -- column name as created
+    created_at REAL NOT NULL
+);
 """
 
 
@@ -46,7 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_queue_user ON queue(user_id, seq);
 class PendingRow:
     pending_id: str
     user_id: str
-    task: Task
+    card: Card
     created_at: float
     reminders_sent: int
     last_reminder_at: Optional[float]
@@ -58,6 +63,11 @@ class DB:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        # legacy DBs store the pending payload in a column named task_json
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(pending)")}
+        if "task_json" in cols:
+            self.conn.execute(
+                "ALTER TABLE pending RENAME COLUMN task_json TO card_json")
         self.conn.commit()
 
     # -- users ------------------------------------------------------------
@@ -86,12 +96,12 @@ class DB:
         self.conn.commit()
 
     # -- pending (spec 5.1) ------------------------------------------------
-    def pending_save(self, user_id: str, task: Task,
+    def pending_save(self, user_id: str, card: Card,
                      created_at: float) -> str:
         pending_id = "P" + uuid.uuid4().hex[:6].upper()
         self.conn.execute(
-            "INSERT INTO pending (pending_id, user_id, task_json, created_at) VALUES (?,?,?,?)",
-            (pending_id, user_id, json.dumps(task.__dict__), created_at))
+            "INSERT INTO pending (pending_id, user_id, card_json, created_at) VALUES (?,?,?,?)",
+            (pending_id, user_id, json.dumps(card.__dict__), created_at))
         self.conn.commit()
         return pending_id
 
@@ -101,7 +111,7 @@ class DB:
             (pending_id,)).fetchone()
         return self._row_to_pending(row) if row else None
 
-    def pending_set_status(self, pending_id: str, status: str) -> Optional[Task]:
+    def pending_set_status(self, pending_id: str, status: str) -> Optional[Card]:
         row = self.conn.execute(
             "SELECT * FROM pending WHERE pending_id = ?", (pending_id,)).fetchone()
         if not row:
@@ -110,9 +120,9 @@ class DB:
             "UPDATE pending SET status = ? WHERE pending_id = ?",
             (status, pending_id))
         self.conn.commit()
-        task = Task(**json.loads(row["task_json"]))
-        task.action = Action(task.action)
-        return task
+        card = Card(**json.loads(row["card_json"]))
+        card.action = parse_action(card.action)
+        return card
 
     def pending_active(self, user_id: str) -> list[PendingRow]:
         rows = self.conn.execute(
@@ -142,13 +152,30 @@ class DB:
 
     @staticmethod
     def _row_to_pending(row: sqlite3.Row) -> PendingRow:
-        task = Task(**json.loads(row["task_json"]))
-        task.action = Action(task.action)
+        card = Card(**json.loads(row["card_json"]))
+        card.action = parse_action(card.action)
         return PendingRow(
             pending_id=row["pending_id"], user_id=row["user_id"],
-            task=task,
+            card=card,
             created_at=row["created_at"], reminders_sent=row["reminders_sent"],
             last_reminder_at=row["last_reminder_at"], status=row["status"])
+
+    # -- lists (local mirror of board columns created via add_list) ---------
+    # Trello stays the source of truth: rows are written only AFTER the
+    # Trello create_list call succeeded (the pipeline calls list_save then).
+    def list_save(self, list_id: str, name: str, created_at: float) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO lists (list_id, name, created_at) VALUES (?,?,?)",
+            (list_id, name, created_at))
+        self.conn.commit()
+
+    def list_get(self, list_id: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM lists WHERE list_id = ?", (list_id,)).fetchone()
+
+    def list_all(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM lists ORDER BY created_at").fetchall()
 
     # -- FIFO queue (spec 5.3: ingestion only) -----------------------------
     def queue_push(self, user_id: str, message_id: str, payload: str) -> None:

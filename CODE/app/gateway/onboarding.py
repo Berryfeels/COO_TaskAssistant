@@ -43,8 +43,8 @@ class Onboarding:
             self.db.upsert_user(user_id, member_id)
             self._awaiting_name.discard(user_id)
             await self.gateway.send(
-                user_id, f"Thanks, {full_name}. You can give me tasks now.")
-            return False                         # the name is not a task
+                user_id, f"Thanks, {full_name}. You can give me cards now.")
+            return False                         # the name is not a card
         if not matches:
             await self.gateway.send(
                 user_id, f"I can't find {name!r} on the board. "

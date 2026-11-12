@@ -25,6 +25,7 @@ class Settings:
     trello_key: str = ""
     trello_token: str = ""
     trello_board_id: str = ""
+    trello_board_sandbox_id: str = ""     # sandbox board for scripts/*_test.py (the bot uses trello_board_id)
     trello_default_list_id: str = ""       # where creates land when no column is named
     mistral_api_key: str = ""
     mistral_model: str = "mistral-small-latest"
@@ -43,6 +44,7 @@ def _load() -> Settings:
         trello_key=_env("TRELLO_KEY", ""),
         trello_token=_env("TRELLO_TOKEN", ""),
         trello_board_id=_env("TRELLO_BOARD_ID", ""),
+        trello_board_sandbox_id=_env("TRELLO_BOARD_SANDBOX_ID", ""),
         trello_default_list_id=_env("TRELLO_DEFAULT_LIST_ID", ""),
         mistral_api_key=_env("MISTRAL_API_KEY", ""),
         mistral_model=_env("MISTRAL_MODEL", "mistral-small-latest"),

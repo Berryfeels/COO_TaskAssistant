@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Conversational test: rich Italian task creation (real Mistral + Trello).
+"""Conversational test: rich Italian card creation (real Mistral + Trello).
 
 Usage:
     export MISTRAL_API_KEY=...             # required
     export TRELLO_KEY=... TRELLO_TOKEN=...
-    export TRELLO_SANDBOX_BOARD_ID=...     # sandbox board id
-    export TRELLO_SANDBOX_LIST_ID=...      # list (column) where test cards land
+    export TRELLO_BOARD_SANDBOX_ID=...     # sandbox board id
+    export TRELLO_DEFAULT_LIST_ID=...      # list (column) where test cards land
+                                            # (both are read from .env if not exported)
     export MISTRAL_MODEL=...               # optional, default mistral-small-latest
 
     python3 scripts/italian_scenario_test.py
@@ -45,7 +46,7 @@ from app.config import settings
 from app.confirm.pending import PendingService
 from app.orchestrator.mistral_llm import MistralLLM
 from app.pipeline import Pipeline
-from app.schema import Action, Task
+from app.schema import Action, Card
 from app.storage.db import DB
 from app.trello.client import TrelloClient
 
@@ -75,15 +76,15 @@ class SandboxHarness(SandboxListLLM):
     """Sandbox wrapper: force the sandbox list and drop labels (the sandbox
     harness cannot resolve label IDs; the policy forbids inventing them)."""
 
-    def interpret(self, text: str, user: dict, trello) -> Task:
-        task = super().interpret(text, user, trello)
-        task.labels = []
-        return task
+    def interpret(self, text: str, user: dict, trello) -> Card:
+        card = super().interpret(text, user, trello)
+        card.labels = []
+        return card
 
 
 async def run(pipeline, db, trello, gateway, pre_ids: set) -> list[bool]:
     results: list[bool] = []
-    task, pending_id = None, None
+    card, pending_id = None, None
 
     print("1) user message (Italian):")
     print(f"   {SCENARIO_MSG!r}")
@@ -94,28 +95,28 @@ async def run(pipeline, db, trello, gateway, pre_ids: set) -> list[bool]:
               f"{gateway.replies[-1]!r}")
         return [check("LLM produced a create action", False)]
     row = active[-1]
-    task, pending_id = row.task, row.pending_id
+    card, pending_id = row.card, row.pending_id
 
-    print("2) extracted Task (orchestrator output, spec section 4):")
-    print("   " + json.dumps(task.__dict__, default=str, indent=2)
+    print("2) extracted Card (orchestrator output, spec section 4):")
+    print("   " + json.dumps(card.__dict__, default=str, indent=2)
           .replace("\n", "\n   "))
 
     results.append(check("LLM produced a create action",
-                         task.action == Action.create,
-                         f"action={task.action}"))
+                         card.action == Action.add_card,
+                         f"action={card.action}"))
     results.append(check("title in English, auto-generated from the request",
-                         "cake" in task.title.lower()
-                         and "torta" not in task.title.lower(),
-                         repr(task.title)))
+                         "cake" in card.title.lower()
+                         and "torta" not in card.title.lower(),
+                         repr(card.title)))
     members = {m["id"]: m["fullName"] for m in trello.list_members()}
     stefano = [mid for mid, name in members.items()
                if "stefano" in name.lower()]
     results.append(check("subject 'Stefano' is the responsible member",
-                         sorted(task.assignees) == sorted(stefano),
-                         f"assignees={task.assignees} vs members={members}"))
+                         sorted(card.assignees) == sorted(stefano),
+                         f"assignees={card.assignees} vs members={members}"))
     due_dt = None
     try:
-        due_dt = datetime.fromisoformat((task.due or "").replace("Z", "+00:00"))
+        due_dt = datetime.fromisoformat((card.due or "").replace("Z", "+00:00"))
     except ValueError:
         pass
     results.append(check("due: date+time with Europe/Berlin offset",
@@ -123,8 +124,8 @@ async def run(pipeline, db, trello, gateway, pre_ids: set) -> list[bool]:
                          and (due_dt.year, due_dt.month, due_dt.day) == DUE_DATE
                          and due_dt.hour == DUE_TIME
                          and due_dt.utcoffset() == timedelta(hours=1),
-                         f"due={task.due!r}"))
-    desc = (task.description or "").lower()
+                         f"due={card.due!r}"))
+    desc = (card.description or "").lower()
     missing = [s for s in DESC_MUST_CONTAIN if s not in desc]
     results.append(check("description carries every stated fact (English)",
                          not missing, f"missing: {missing}, desc={desc!r}"))
@@ -144,40 +145,40 @@ async def run(pipeline, db, trello, gateway, pre_ids: set) -> list[bool]:
 
     print("4) mirror audit: card on the sandbox board")
     new = _new_cards(trello, pre_ids)
-    card = next((c for c in new if c.get("name") == task.title),
-                new[0] if new else None)
-    results.append(check("card visible on board immediately", card is not None))
-    if card:
-        print(f"   card {card['id']}: {card.get('name')!r} "
-              f"due={card.get('due')!r} idList={card.get('idList')!r}")
-        back = Task.from_card(card)
-        results.append(check("round-trip title", back.title == task.title,
-                             f"{back.title!r} != {task.title!r}"))
+    found = next((c for c in new if c.get("name") == card.title),
+                 new[0] if new else None)
+    results.append(check("card visible on board immediately", found is not None))
+    if found:
+        print(f"   card {found['id']}: {found.get('name')!r} "
+              f"due={found.get('due')!r} idList={found.get('idList')!r}")
+        back = Card.from_api(found)
+        results.append(check("round-trip title", back.title == card.title,
+                             f"{back.title!r} != {card.title!r}"))
         results.append(check("round-trip description",
-                             back.description == task.description,
-                             f"{back.description!r} != {task.description!r}"))
+                             back.description == card.description,
+                             f"{back.description!r} != {card.description!r}"))
         results.append(check("assignee mirrored on the card",
-                             sorted(back.assignees) == sorted(task.assignees),
-                             f"{back.assignees} != {task.assignees}"))
+                             sorted(back.assignees) == sorted(card.assignees),
+                             f"{back.assignees} != {card.assignees}"))
         results.append(check("due mirrored on the card (Berlin time kept)",
-                             bool(card.get("due"))
+                             bool(found.get("due"))
                              and datetime.fromisoformat(
-                                 card["due"].replace("Z", "+00:00")
+                                 found["due"].replace("Z", "+00:00")
                              ).hour == DUE_TIME - 1,
-                             f"card due={card.get('due')!r}"))
+                             f"card due={found.get('due')!r}"))
     return results
 
 
 def main() -> int:
     key = os.environ.get("TRELLO_KEY", "")
     token = os.environ.get("TRELLO_TOKEN", "")
-    board_id = os.environ.get("TRELLO_SANDBOX_BOARD_ID", "")
-    list_id = os.environ.get("TRELLO_SANDBOX_LIST_ID", "")
+    board_id = os.environ.get("TRELLO_BOARD_SANDBOX_ID", "")
+    list_id = os.environ.get("TRELLO_DEFAULT_LIST_ID", "")
     api_key = os.environ.get("MISTRAL_API_KEY", "") or settings.mistral_api_key
     missing = [n for n, v in {"MISTRAL_API_KEY": api_key, "TRELLO_KEY": key,
                               "TRELLO_TOKEN": token,
-                              "TRELLO_SANDBOX_BOARD_ID": board_id,
-                              "TRELLO_SANDBOX_LIST_ID": list_id}.items()
+                              "TRELLO_BOARD_SANDBOX_ID": board_id,
+                              "TRELLO_DEFAULT_LIST_ID": list_id}.items()
                if not v]
     if missing:
         print(__doc__)

@@ -4,20 +4,20 @@ interpreting natural-language messages, full pipeline in between
 (message -> confirmation -> card created on the Trello SANDBOX board).
 
 Usage:
-    export MISTRAL_API_KEY=...             # required (except with --offline)
+    export MISTRAL_API_KEY=...             # required
     export TRELLO_KEY=...
     export TRELLO_TOKEN=...
-    export TRELLO_SANDBOX_BOARD_ID=...     # sandbox board id
-    export TRELLO_SANDBOX_LIST_ID=...     # list (column) where test cards land
+    export TRELLO_BOARD_SANDBOX_ID=...     # sandbox board id
+    export TRELLO_DEFAULT_LIST_ID=...      # list (column) where test cards land
+                                            # (both are read from .env if not exported)
     export MISTRAL_MODEL=...               # optional, default mistral-small-latest
 
     python3 scripts/mistral_conversation_test.py            # scripted scenario
     python3 scripts/mistral_conversation_test.py -i        # free conversation (REPL)
     python3 scripts/mistral_conversation_test.py --keep    # keep the test cards
-    python3 scripts/mistral_conversation_test.py --offline # no network, wiring check
 
-The scripted scenario sends "create task ... for Marco due Friday", prints the
-Task the LLM extracted, asks for a confirmation, replies "OK <pending_id>",
+The scripted scenario sends "create card ... for Marco due Friday", prints the
+Card the LLM extracted, asks for a confirmation, replies "OK <pending_id>",
 verifies the card on the board (mirror audit) and finally deletes the cards
 it created (unless --keep). Only cards created during this run are touched.
 If 'Marco' is not a member of the sandbox board the LLM is expected to ask a
@@ -35,20 +35,23 @@ import uuid
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from run_bot import load_dotenv
+load_dotenv()
 
 from app.config import settings
 from app.confirm.pending import PendingService
-from app.orchestrator.agent import MockLLM
 from app.orchestrator.mistral_llm import MistralLLM
 from app.pipeline import Gateway, Pipeline
-from app.schema import Action, Task
+from app.schema import Action, Card
 from app.storage.db import DB
-from app.trello.client import FakeTrello, TrelloClient
+from app.trello.client import TrelloClient
 
 PASS, FAIL = "\033[92mPASS\033[0m", "\033[91mFAIL\033[0m"
 USER_ID = "sandbox-user"
-SCENARIO_MSG = "create task Call the supplier for Marco due Friday"
-SCENARIO_FALLBACK = "create task Call the supplier due Friday"
+SCENARIO_MSG = "create card Call the supplier for Marco due Friday"
+SCENARIO_FALLBACK = "create card Call the supplier due Friday"
 
 
 def check(name, cond, detail=""):
@@ -81,22 +84,18 @@ class SandboxListLLM:
     def __init__(self, inner, list_id: str):
         self.inner, self.list_id = inner, list_id
 
-    def interpret(self, text: str, user: dict, trello) -> Task:
-        task = self.inner.interpret(text, user, trello)
-        if task.action == Action.create and not task.list_id:
-            task.list_id = self.list_id
-        return task
+    def interpret(self, text: str, user: dict, trello) -> Card:
+        card = self.inner.interpret(text, user, trello)
+        if card.action == Action.add_card and not card.list_id:
+            card.list_id = self.list_id
+        return card
 
 
-def build(offline: bool, board_id: str, list_id: str, key: str, token: str):
+def build(board_id: str, list_id: str, key: str, token: str):
     db = DB(":memory:")                     # throwaway: never touches coo.db
-    if offline:
-        trello = FakeTrello()
-        llm = MockLLM()
-    else:
-        trello = TrelloClient(key, token, board_id=board_id)
-        llm = MistralLLM(model=os.environ.get("MISTRAL_MODEL")
-                          or settings.mistral_model)
+    trello = TrelloClient(key, token, board_id=board_id)
+    llm = MistralLLM(model=os.environ.get("MISTRAL_MODEL")
+                      or settings.mistral_model)
     pending = PendingService(db, settings)
     gateway = PrintingGateway()
     pipeline = Pipeline(db, trello, SandboxListLLM(llm, list_id),
@@ -119,14 +118,11 @@ def cleanup(trello, pre_ids: set, key: str, token: str, keep: bool) -> None:
         return
     print(f"cleanup: deleting {len(new)} test card(s) created by this run")
     for c in new:
-        if isinstance(trello, FakeTrello):
-            trello.cards.pop(c["id"], None)
-        else:
-            url = (f"{trello.BASE}/cards/{c['id']}?"
-                   + urllib.parse.urlencode({"key": key, "token": token}))
-            req = urllib.request.Request(url, method="DELETE")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
+        url = (f"{trello.BASE}/cards/{c['id']}?"
+               + urllib.parse.urlencode({"key": key, "token": token}))
+        req = urllib.request.Request(url, method="DELETE")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
     print("  deleted.")
 
 
@@ -134,7 +130,7 @@ def cleanup(trello, pre_ids: set, key: str, token: str, keep: bool) -> None:
 async def run_scenario(pipeline, db, trello, gateway, pre_ids: set,
                        message: str, fallback: str | None) -> list[bool]:
     results: list[bool] = []
-    task, pending_id = None, None
+    card, pending_id = None, None
 
     attempts = [message] + ([fallback] if fallback else [])
     for i, text in enumerate(attempts):
@@ -143,42 +139,42 @@ async def run_scenario(pipeline, db, trello, gateway, pre_ids: set,
         active = db.pending_active(USER_ID)
         if active:
             row = active[-1]
-            task, pending_id = row.task, row.pending_id
+            card, pending_id = row.card, row.pending_id
             break
         print(f"  [info] no pending action, assistant said: "
               f"{gateway.replies[-1]!r}")
 
     results.append(check("LLM produced a create action",
-                         task is not None and task.action == Action.create,
-                         f"action={getattr(task, 'action', None)}"))
-    if task is None or task.action != Action.create:
+                         card is not None and card.action == Action.add_card,
+                         f"action={getattr(card, 'action', None)}"))
+    if card is None or card.action != Action.add_card:
         return results
 
-    print("2) extracted Task (orchestrator output, spec section 4):")
-    print("   " + json.dumps(task.__dict__, default=str, indent=2)
+    print("2) extracted Card (orchestrator output, spec section 4):")
+    print("   " + json.dumps(card.__dict__, default=str, indent=2)
           .replace("\n", "\n   "))
-    results.append(check("title extracted", bool(task.title), repr(task.title)))
+    results.append(check("title extracted", bool(card.title), repr(card.title)))
     results.append(check("create lands in the sandbox list",
-                         task.list_id == pipeline.llm.list_id,
-                         f"list_id={task.list_id!r}"))
+                         card.list_id == pipeline.llm.list_id,
+                         f"list_id={card.list_id!r}"))
     if "friday" in message.lower():
         due_dt = None
         try:
             due_dt = datetime.fromisoformat(
-                (task.due or "").replace("Z", "+00:00"))
+                (card.due or "").replace("Z", "+00:00"))
         except ValueError:
             pass
         results.append(check("due resolved to a Friday",
                              due_dt is not None and due_dt.weekday() == 4,
-                             f"due={task.due!r}"))
-    if task.assignees:
+                             f"due={card.due!r}"))
+    if card.assignees:
         members = {m["id"]: m["fullName"] for m in trello.list_members()}
-        ids_ok = all(a in members for a in task.assignees)
+        ids_ok = all(a in members for a in card.assignees)
         results.append(check("assignees are real board members", ids_ok,
-                             f"{task.assignees} vs {members}"))
+                             f"{card.assignees} vs {members}"))
         if ids_ok:
             print(f"   assignee(s): "
-                  + ", ".join(members[a] for a in task.assignees))
+                  + ", ".join(members[a] for a in card.assignees))
 
     results.append(check("confirmation requested with pending id",
                          f"OK {pending_id}" in gateway.replies[-1]))
@@ -193,26 +189,26 @@ async def run_scenario(pipeline, db, trello, gateway, pre_ids: set,
 
     print("4) mirror audit: card on the sandbox board")
     new = _new_cards(trello, pre_ids)
-    card = next((c for c in new if c.get("name") == task.title),
-                new[0] if new else None)
+    found = next((c for c in new if c.get("name") == card.title),
+                 new[0] if new else None)
     results.append(check("card visible on board immediately (deterministic read)",
-                         card is not None))
-    if card:
-        print(f"   card {card['id']}: {card.get('name')!r} "
-              f"due={card.get('due')!r} idList={card.get('idList')!r}")
-        back = Task.from_card(card)
-        results.append(check("round-trip title", back.title == task.title,
-                             f"{back.title!r} != {task.title!r}"))
+                         found is not None))
+    if found:
+        print(f"   card {found['id']}: {found.get('name')!r} "
+              f"due={found.get('due')!r} idList={found.get('idList')!r}")
+        back = Card.from_api(found)
+        results.append(check("round-trip title", back.title == card.title,
+                             f"{back.title!r} != {card.title!r}"))
         results.append(check("round-trip list",
-                             back.list_id == task.list_id,
-                             f"{back.list_id!r} != {task.list_id!r}"))
-        if task.assignees:
+                             back.list_id == card.list_id,
+                             f"{back.list_id!r} != {card.list_id!r}"))
+        if card.assignees:
             results.append(check("assignee mirrored on the card",
-                                sorted(back.assignees) == sorted(task.assignees),
-                                f"{back.assignees} != {task.assignees}"))
-        if task.due:
+                                sorted(back.assignees) == sorted(card.assignees),
+                                f"{back.assignees} != {card.assignees}"))
+        if card.due:
             results.append(check("due mirrored on the card",
-                                 bool(card.get("due"))))
+                                 bool(found.get("due"))))
     return results
 
 
@@ -237,8 +233,8 @@ async def run_interactive(pipeline, db) -> None:
             if not active:
                 print("  (no pending actions)")
             for p in active:
-                print(f"  {p.pending_id}: {p.task.action.value} "
-                      f"{p.task.title or p.task.target_card_id!r}")
+                print(f"  {p.pending_id}: {p.card.action.value} "
+                      f"{p.card.title or p.card.target_card_id!r}")
             continue
         n += 1
         await pipeline.handle_incoming(USER_ID, _mid(), text)
@@ -249,35 +245,28 @@ def main() -> int:
         description="Conversational test: MistralLLM + pipeline + sandbox board")
     ap.add_argument("-i", "--interactive", action="store_true",
                     help="free conversation instead of the scripted scenario")
-    ap.add_argument("--offline", action="store_true",
-                    help="no network: MockLLM + FakeTrello wiring check")
     ap.add_argument("--keep", action="store_true",
                     help="do not delete the cards created during the run")
     ap.add_argument("--message", default=None,
                     help="override the scripted create message")
     args = ap.parse_args()
 
-    key = token = board_id = ""
-    if args.offline:
-        list_id = "offline-list"
-    else:
-        key = os.environ.get("TRELLO_KEY", "")
-        token = os.environ.get("TRELLO_TOKEN", "")
-        board_id = os.environ.get("TRELLO_SANDBOX_BOARD_ID", "")
-        list_id = os.environ.get("TRELLO_SANDBOX_LIST_ID", "")
-        missing = [n for n, v in {
-            "MISTRAL_API_KEY": (os.environ.get("MISTRAL_API_KEY", "")
-                                or settings.mistral_api_key),
-            "TRELLO_KEY": key, "TRELLO_TOKEN": token,
-            "TRELLO_SANDBOX_BOARD_ID": board_id,
-            "TRELLO_SANDBOX_LIST_ID": list_id}.items() if not v]
-        if missing:
-            print(__doc__)
-            print(f"missing environment variables: {', '.join(missing)}")
-            return 2
+    key = os.environ.get("TRELLO_KEY", "")
+    token = os.environ.get("TRELLO_TOKEN", "")
+    board_id = os.environ.get("TRELLO_BOARD_SANDBOX_ID", "")
+    list_id = os.environ.get("TRELLO_DEFAULT_LIST_ID", "")
+    missing = [n for n, v in {
+        "MISTRAL_API_KEY": (os.environ.get("MISTRAL_API_KEY", "")
+                            or settings.mistral_api_key),
+        "TRELLO_KEY": key, "TRELLO_TOKEN": token,
+        "TRELLO_BOARD_SANDBOX_ID": board_id,
+        "TRELLO_DEFAULT_LIST_ID": list_id}.items() if not v]
+    if missing:
+        print(__doc__)
+        print(f"missing environment variables: {', '.join(missing)}")
+        return 2
 
-    db, trello, pipeline, gateway = build(args.offline, board_id, list_id,
-                                          key, token)
+    db, trello, pipeline, gateway = build(board_id, list_id, key, token)
     try:
         pre_ids = {c["id"] for c in trello.board_cards()}
     except urllib.error.HTTPError as e:

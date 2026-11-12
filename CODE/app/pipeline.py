@@ -6,6 +6,9 @@ Implements spec 9.1 with the agreed semantics:
 - Since 2026-10-29 there is no confirmation loop: write actions are applied
   immediately and the bot only confirms the outcome. The confirmation
   matching below remains only to drain pendings created before the change.
+- Trello is the single source of truth: every Trello write happens FIRST and
+  the local DB (pending status, processed IDs) is updated only AFTER the
+  write succeeded. Queries read Trello only, never the local DB.
 - mark_processed(msg.id) means "this message has been handled"; it never
   implies the action was executed (spec 5.2).
 """
@@ -18,7 +21,7 @@ from .config import Settings
 from .confirm.pending import PendingService
 from .notify import builder
 from .orchestrator.agent import LLMProvider
-from .schema import Action, Clarification, Task
+from .schema import Action, Clarification, Card
 from .similarity import is_similar
 from .storage.db import DB
 from .trello.client import TrelloLike
@@ -61,19 +64,23 @@ class Pipeline:
             return
 
         # 1. Is this a confirmation of an existing pending action?
+        #    Trello is the source of truth: write there FIRST, update the DB
+        #    only after the write succeeded (spec: the DB follows Trello).
         decision = self.pending.match_confirmation(user_id, text)
-        if decision.kind == "applied":
-            self.db.mark_processed(message_id)          # message fully handled
+        if decision.kind == "confirm":
             try:
-                result = self.trello.apply(decision.task)   # the only Trello write
+                result = self.trello.apply(decision.card)   # the only Trello write
             except Exception as e:
-                # the pending is consumed: tell the user instead of
-                # failing silently (the error must never look like a
-                # connection problem)
+                # the pending stays active, so a later "OK <id>" retries the
+                # write; the message itself is handled (not replayed)
+                self.db.mark_processed(message_id)
                 await self.gateway.send(
-                    user_id, builder.render_write_error(decision.task, e))
+                    user_id, builder.render_write_error(decision.card, e))
                 return
-            await self.gateway.send(user_id, builder.render_result(decision.task, result))
+            self._record_list(decision.card, result)        # DB AFTER Trello
+            self.pending.apply_by_id(decision.pending_id)   # DB AFTER Trello
+            self.db.mark_processed(message_id)
+            await self.gateway.send(user_id, builder.render_result(decision.card, result))
             return
         if decision.kind == "ambiguous":
             self.db.mark_processed(message_id)
@@ -83,7 +90,7 @@ class Pipeline:
         # 2. The LLM owns the conversation: interpret with per-user
         #    history (greetings/chat are answered freely by the model).
         try:
-            task = self.llm.interpret(
+            card = self.llm.interpret(
                 text, {"source_message_id": message_id, "user_id": user_id},
                 self.trello)
         except Clarification as c:
@@ -98,14 +105,14 @@ class Pipeline:
             return
 
         # 3. Free conversation: answer directly, nothing happens on the board.
-        if task.action == Action.chat:
+        if card.action == Action.chat:
             self.db.mark_processed(message_id)
-            await self.gateway.send(user_id, builder.render_chat(task))
+            await self.gateway.send(user_id, builder.render_chat(card))
             return
 
         # 4. Queries are read-only: answer immediately.
-        if task.action == Action.query:
-            await self._answer_query(user_id, task)
+        if card.action == Action.query:
+            await self._answer_query(user_id, card)
             self.db.mark_processed(message_id)  # after the reply: a crash
             return                             # keeps the message retryable
 
@@ -113,56 +120,73 @@ class Pipeline:
         #    outcome. No confirmation loop (spec change 2026-10-29): the
         #    action lands on the board right away and the bot only reports.
         try:
-            task.validate()
+            card.validate()
         except ValueError as e:
             # an action with no real change (e.g. move_date without a new
             # date) would be applied as a Trello no-op and reported as done:
             # reject it here and tell the user instead of crashing silently
             self.db.mark_processed(message_id)
-            await self.gateway.send(user_id, builder.render_invalid(task, e))
+            await self.gateway.send(user_id, builder.render_invalid(card, e))
             return
-        similar = self._similar_tasks(user_id, task)
+        similar = self._similar_cards(user_id, card)
         try:
-            result = self.trello.apply(task)          # the only Trello write
+            result = self.trello.apply(card)          # Trello FIRST (source of truth)
         except Exception as e:
-            self.db.mark_processed(message_id)
+            self.db.mark_processed(message_id)        # message handled, nothing written
             await self.gateway.send(
-                user_id, builder.render_write_error(task, e))
+                user_id, builder.render_write_error(card, e))
             return
-        self.db.mark_processed(message_id)
+        self._record_list(card, result)               # DB AFTER the Trello write
+        self.db.mark_processed(message_id)            # DB AFTER the Trello write
         await self.gateway.send(
-            user_id, builder.render_result(task, result, similar))
+            user_id, builder.render_result(card, result, similar))
 
-    def _similar_tasks(self, user_id: str, task: Task) -> list[str]:
+    def _record_list(self, card: Card, result: dict) -> None:
+        """Mirror a created column into the local DB. Trello is the source of
+        truth, so this runs only after create_list succeeded."""
+        if card.action == Action.add_list and result.get("id"):
+            self.db.list_save(result["id"], card.title, time.time())
+
+    def _similar_cards(self, user_id: str, card: Card) -> list[str]:
         """Near-duplicate guard: message-ID idempotency (spec 5.2) cannot
-        catch a reworded repeat of a forgotten task, so warn about active
+        catch a reworded repeat of a forgotten card, so warn about active
         pendings and open cards with a similar title. Only a heads-up in
         the confirmation - the user decides; nothing is ever blocked."""
-        if task.action != Action.create:
+        if card.action != Action.add_card:
             return []
         hits: list[str] = []
         for row in self.pending.active(user_id):
-            if (row.task.action == Action.create and row.task.title
-                    and is_similar(row.task.title, task.title)):
-                hits.append(f"'{row.task.title}' (pending [{row.pending_id}])")
-        for card in self.trello.board_cards():
-            if card.get("closed") or not card.get("name"):
+            if (row.card.action == Action.add_card and row.card.title
+                    and is_similar(row.card.title, card.title)):
+                hits.append(f"'{row.card.title}' (pending [{row.pending_id}])")
+        for existing in self.trello.board_cards():
+            if existing.get("closed") or not existing.get("name"):
                 continue
-            if is_similar(card["name"], task.title):
-                hits.append(f"'{card['name']}' (already on the board)")
+            if is_similar(existing["name"], card.title):
+                hits.append(f"'{existing['name']}' (already on the board)")
         return hits
 
-    async def _answer_query(self, user_id: str, task: Task) -> None:
+    async def _answer_query(self, user_id: str, card: Card) -> None:
+        # Reads TRELLO only, never the local DB: Trello is the single source
+        # of truth and users look at the board, not at our SQLite. Each line
+        # shows the column and the done flag exactly as the board shows them.
         # board_cards(), not search_cards(""): Trello's /1/search rejects an
         # empty query with HTTP 400 and its index lags behind anyway
         cards = self.trello.board_cards() or []
+        columns = {l["id"]: l["name"] for l in self.trello.list_lists()}
         open_cards = [c for c in cards if not c.get("closed")]
         if not open_cards:
-            await self.gateway.send(user_id, "You have no open tasks.")
+            await self.gateway.send(user_id, "You have no open cards.")
             return
-        lines = [f"- {c['name']}" + (f" (due {c['due']})" if c.get("due") else "")
-                 for c in open_cards]
-        await self.gateway.send(user_id, "Your open tasks:\n" + "\n".join(lines))
+        lines = []
+        for c in open_cards:
+            column = columns.get(c.get("idList"), "?")
+            done = " (done)" if c.get("dueComplete") else ""
+            due = f", due {c['due']}" if c.get("due") else ""
+            lines.append(f"- {c['name']} [{column}]{done}{due}")
+        await self.gateway.send(user_id,
+                                "Your open cards (from Trello):\n"
+                                + "\n".join(lines))
 
     # -- scheduler jobs (spec 5.1.3, 5.1.4) --------------------------------------
     async def reminder_job(self, now: float | None = None) -> None:
@@ -176,10 +200,10 @@ class Pipeline:
                         - now) / 3600))
             await self.gateway.send(row.user_id,
                                     builder.render_reminder(row.pending_id,
-                                                            row.task, hours_left))
+                                                            row.card, hours_left))
 
     async def expiry_job(self, now: float | None = None) -> None:
         now = now if now is not None else time.time()
-        for pending_id, user_id, task in self.pending.expire(now):
+        for pending_id, user_id, card in self.pending.expire(now):
             await self.gateway.send(user_id,
-                                    builder.render_cancelled(pending_id, task))
+                                    builder.render_cancelled(pending_id, card))
