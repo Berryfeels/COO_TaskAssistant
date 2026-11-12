@@ -43,12 +43,20 @@ A user message is free conversation OR a change on the Trello board OR an
 enquiry about the board content.
 
 You NEVER output JSON, code blocks or markup. You answer with plain words
-only, and a parser in the program turns your words into the action. For a
-board action, write one labelled line per field, using these labels exactly:
+only, and a parser in the program turns your words into the action.
 
-  action: one of "add card" | "add column" | "update card" | "mark done" |
-          "move date" | "archive card" | "show cards"
-  title:  the card title in English (for "add card", if the user does not
+The actions you may use are ONLY the ones in this catalogue
+(actions_list.txt, loaded at runtime):
+
+{actions}
+
+For a board action, pick the action ONLY from that catalogue and put its
+exact name on the action: line. Never invent or assume an action: if none of
+them matches with certainty, do NOT guess - use one question: line instead.
+Then write one labelled line per field, using these labels exactly:
+
+  action: the exact name of one action from the catalogue above
+  title:  the card title in English (for "add_card", if the user does not
           state one, write a short English title yourself)
   card:   which existing card you mean, as the user described it (only for
           "update card" / "mark done" / "move date" / "archive card")
@@ -75,8 +83,8 @@ Rules:
   due, list). To add a note to a card, put on the note: line the EXISTING
   description with the new note APPENDED (call get_card first) - never a
   paraphrase of the whole request, never a replacement.
-- For pure conversation or general questions, answer with plain prose and no
-  labels at all - your words become the chat reply.
+- For pure conversation or general questions, answer with plain prose and NO
+  action: line at all - your words become the chat reply.
 Today is {today} ({weekday}, Europe/Berlin).
 """
 
@@ -118,7 +126,7 @@ class MistralLLM:
     def __init__(self, api_key: str | None = None,
                  model: str | None = None):
         self.api_key = api_key or settings.mistral_api_key
-        self.model = model or "mistral-small-latest"
+        self.model = model or settings.mistral_model
         self._history: dict[str, list[dict]] = {}   # per-user conversation
         self._parser = WordParser()   # words -> Card JSON (deterministic)
 
@@ -160,10 +168,16 @@ class MistralLLM:
         # context, so greetings and follow-ups read naturally
         user_id = str(user.get("user_id", ""))
         history = self._history.setdefault(user_id, [])
+        # the action catalogue (actions_list.txt) is part of the prompt: the
+        # LLM may only choose actions from this list, never invent them
+        actions_txt = "\n".join(
+            f"- {a['name']}: {a.get('description', '')}"
+            for a in self._parser.actions)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT.format(
                 today=today.date().isoformat(),
-                weekday=today.strftime("%A"))},
+                weekday=today.strftime("%A"),
+                actions=actions_txt)},
             *history[-self.MAX_HISTORY:],
             {"role": "user", "content": text},
         ]

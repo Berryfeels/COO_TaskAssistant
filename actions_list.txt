@@ -1,94 +1,94 @@
-# Azioni Trello più comuni usate da un umano su Lists, Cards e i loro elementi
-# (members, labels, due dates, checklists, comments, allegati, voti, sticker)
-# Estratte da trello_index.txt — formato identico: METHOD path (params) # descrizione
-# I nomi in fondo (createCard, updateList, ...) sono i "List of actions type" corrispondenti
-
-## LISTS — creare e manipolare le colonne
-POST /boards/{id}/lists  (name*, pos)  # Create a List on a Board  [createList]
-POST /lists  (name*, idBoard*, idListSource, pos)  # Create a new List  [createList]
-GET /boards/{id}/lists  (cards, card_fields, filter, fields)  # Get Lists on a Board
-GET /lists/{id}  (fields)  # Get a List
-GET /lists/{id}/cards  ()  # Get Cards in a List
-PUT /lists/{id}  (name, closed, idBoard, pos, subscribed)  # Update a List (rinomina, riordina, sposta)  [updateList]
-PUT /lists/{id}/closed  (value)  # Archive or unarchive a list  [updateList]
-PUT /lists/{id}/idBoard  (value*)  # Move List to Board  [moveListToBoard]
-PUT /lists/{id}/{field}  (value)  # Update a field on a List
-POST /lists/{id}/archiveAllCards  ()  # Archive all Cards in List
-POST /lists/{id}/moveAllCards  (idBoard*, idList*)  # Move all Cards in List
-
-## CARDS — creare e manipolare le card
-POST /cards  (name, desc, pos, due, start, dueComplete, idList*, idMembers, idLabels, urlSource, fileSource, mimeType, idCardSource, keepFromSource, address, locationName, coordinates, cardRole)  # Create a new Card  [createCard]
-GET /cards/{id}  (fields, actions, attachments, members, membersVoted, checkItemStates, checklists, board, list, stickers, customFieldItems)  # Get a Card
-GET /boards/{id}/cards  ()  # Get Cards on a Board
-GET /lists/{id}/cards  ()  # Get Cards in a List
-PUT /cards/{id}  (name, desc, closed, idMembers, idAttachmentCover, idList, idLabels, idBoard, pos, due, start, dueComplete, subscribed, address, locationName, coordinates, cover)  # Update a Card (titolo, descrizione, sposta in altra lista, data di scadenza, archivia)  [updateCard / moveCardToBoard]
-DELETE /cards/{id}  ()  # Delete a Card  [deleteCard]
-
-## MEMBERS — assegnare persone a una card
-POST /cards/{id}/idMembers  (value)  # Add a Member to a Card  [addMemberToCard]
-DELETE /cards/{id}/idMembers/{idMember}  ()  # Remove a Member from a Card  [removeMemberFromCard]
-GET /cards/{id}/members  (fields)  # Get the Members of a Card
-PUT /cards/{id}  (idMembers, ...)  # Update a Card — setta/sostituisce i membri
-
-## LABELS — etichette su una card
-POST /boards/{id}/labels  (name*, color*)  # Create a Label on a Board
-POST /labels  (name*, color*, idBoard*)  # Create a Label
-POST /cards/{id}/idLabels  (value)  # Add a Label to a Card
-POST /cards/{id}/labels  (color*, name)  # Create a new Label on a Card
-DELETE /cards/{id}/idLabels/{idLabel}  ()  # Remove a Label from a Card
-GET /boards/{id}/labels  (fields, limit)  # Get Labels on a Board
-PUT /labels/{id}  (name, color)  # Update a Label
-DELETE /labels/{id}  ()  # Delete a Label
-
-## DUE DATES — scadenze e date su una card
-POST /cards  (due, start, dueComplete, idList*, ...)  # Create a Card con scadenza/inizio/flag completato
-PUT /cards/{id}  (due, start, dueComplete, ...)  # Update a Card — setta/modifica/rimuove la scadenza e marca "completata"  [updateCard]
-
-## CHECKLISTS — checklist e checkItem dentro una card
-POST /cards/{id}/checklists  (name, idChecklistSource, pos)  # Create Checklist on a Card  [addChecklistToCard]
-POST /checklists  (idCard*, name, pos, idChecklistSource)  # Create a Checklist  [addChecklistToCard]
-GET /cards/{id}/checklists  (checkItems, checkItem_fields, filter, fields)  # Get Checklists on a Card
-PUT /checklists/{id}  (name, pos)  # Update a Checklist  [updateChecklist]
-DELETE /cards/{id}/checklists/{idChecklist}  ()  # Delete a Checklist on a Card  [removeChecklistFromCard]
-DELETE /checklists/{id}  ()  # Delete a Checklist
-POST /checklists/{id}/checkItems  (name*, pos, checked, due, dueReminder, idMember)  # Create Checkitem on Checklist
-GET /checklists/{id}/checkItems  (filter, fields)  # Get Checkitems on a Checklist
-PUT /cards/{id}/checkItem/{idCheckItem}  (name, state, idChecklist, pos, due, dueReminder, idMember)  # Update a checkItem on a Card (spunta "state=complete", rinomina, sposta, assegna, scadenza)  [updateCheckItemStateOnCard]
-PUT /cards/{idCard}/checklist/{idChecklist}/checkItem/{idCheckItem}  (pos)  # Update Checkitem on Checklist on Card (riordina)
-DELETE /cards/{id}/checkItem/{idCheckItem}  ()  # Delete checkItem on a Card
-DELETE /checklists/{id}/checkItems/{idCheckItem}  ()  # Delete Checkitem from Checklist
-GET /cards/{id}/checkItemStates  (fields)  # Get checkItems on a Card (stato spunta)
-
-## COMMENTS — commentaires e azioni su una card
-POST /cards/{id}/actions/comments  (text*)  # Add a new comment to a Card  [commentCard]
-PUT /cards/{id}/actions/{idAction}/comments  (text*)  # Update Comment Action on a Card
-PUT /actions/{id}/text  (value*)  # Update a Comment Action
-DELETE /cards/{id}/actions/{idAction}/comments  ()  # Delete a comment on a Card
-GET /cards/{id}/actions  (filter, page)  # Get Actions on a Card (commenti e altre attività)
-POST /actions/{idAction}/reactions  ()  # Create Reaction for Action (emoji sui commenti)
-
-## ATTACHMENTS — allegati su una card
-POST /cards/{id}/attachments  (name, file, mimeType, url, setCover)  # Create Attachment On Card  [addAttachmentToCard]
-GET /cards/{id}/attachments  (fields, filter)  # Get Attachments on a Card
-DELETE /cards/{id}/attachments/{idAttachment}  ()  # Delete an Attachment on a Card
-PUT /cards/{id}  (idAttachmentCover, ...)  # Setta l'allegato come copertina della card
-
-## VOTES — votazioni su una card
-POST /cards/{id}/membersVoted  (value*)  # Add Member vote to Card
-DELETE /cards/{id}/membersVoted/{idMember}  ()  # Remove a Member's Vote on a Card
-GET /cards/{id}/membersVoted  (fields)  # Get Members who have voted on a Card
-
-## STICKERS — sticker su una card
-POST /cards/{id}/stickers  (image*, top*, left*, zIndex*, rotate)  # Add a Sticker to a Card
-PUT /cards/{id}/stickers/{idSticker}  (top*, left*, zIndex*, rotate)  # Update a Sticker on a Card
-DELETE /cards/{id}/stickers/{idSticker}  ()  # Delete a Sticker on a Card
-GET /cards/{id}/stickers  (fields)  # Get Stickers on a Card
-
-## LETTURE — board, liste e card ( quello che un umano apre per primo )
-GET /boards/{id}  (actions, cards, checklists, fields, labels, lists, members, ...)  # Get a Board con liste, card, etichette, membri
-GET /boards/{id}/lists  (cards, card_fields, filter, fields)  # Get Lists on a Board (con le card dentro)
-GET /boards/{id}/cards  ()  # Get Cards on a Board
-GET /boards/{id}/labels  (fields, limit)  # Get Labels on a Board
-GET /boards/{id}/members  ()  # Get the Members of a Board
-GET /cards/{id}  (fields, actions, attachments, members, checklists, ...)  # Get a Card (dettaglio completo)
-GET /search  (query*, idBoards, idCards, modelTypes, ...)  # Search Trello (trova card/liste/membri)
+[
+  {
+    "name": "add_card",
+    "description": "Create a new card on the Trello board. Use when the user asks to add, create, note down or be reminded about something to do.",
+    "triggers": ["add card", "add a card", "add task", "add a task", "create card", "create a card", "create task", "create a task", "new card", "new task", "note down", "remind me", "reminder", "to-do", "todo"],
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "title": {"type": "string", "description": "Card title, in English."},
+        "list": {"type": "string", "description": "Column name as the user said it. Omit if not stated."},
+        "members": {"type": "array", "items": {"type": "string"}, "description": "Assignees, as named by the user."},
+        "due": {"type": "string", "description": "Due date in plain words ('Friday at 9') or ISO 8601."},
+        "labels": {"type": "array", "items": {"type": "string"}},
+        "description": {"type": "string", "description": "Extra notes, in English."}
+      },
+      "required": ["title"]
+    }
+  },
+  {
+    "name": "add_list",
+    "description": "Create a new column (list) on the Trello board. Use when the user asks for a new column or list.",
+    "triggers": ["add list", "add a list", "add column", "add a column", "new list", "new column", "create list", "create column", "another column", "another list"],
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "title": {"type": "string", "description": "Name of the new column, in English."}
+      },
+      "required": ["title"]
+    }
+  },
+  {
+    "name": "update",
+    "description": "Update an existing card: change its title, notes, assignees, due date or column (move the card to another column).",
+    "triggers": ["update", "update card", "update the card", "change card", "change the card", "edit card", "rename", "move card", "move the card", "move to", "edit", "change", "modify"],
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "card": {"type": "string", "description": "The card to update, as the user described it."},
+        "title": {"type": "string", "description": "New title, in English."},
+        "note": {"type": "string", "description": "New description or appended note, in English."},
+        "assign": {"type": "string", "description": "Assignees, as named by the user."},
+        "due": {"type": "string", "description": "New due date."},
+        "list": {"type": "string", "description": "Destination column, as the user said it."}
+      },
+      "required": ["card"]
+    }
+  },
+  {
+    "name": "complete",
+    "description": "Mark a card as done: move it to the Done column and set dueComplete.",
+    "triggers": ["mark done", "mark as done", "set done", "complete", "completed", "finish", "done", "finished", "mark complete"],
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "card": {"type": "string", "description": "The card to mark as done, as the user described it."}
+      },
+      "required": ["card"]
+    }
+  },
+  {
+    "name": "move_date",
+    "description": "Change only the due date of an existing card.",
+    "triggers": ["move date", "move the date", "change date", "change due", "move due", "reschedule", "postpone", "new due date", "new deadline"],
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "card": {"type": "string", "description": "The card whose due date changes."},
+        "due": {"type": "string", "description": "The new due date, in plain words or ISO 8601."}
+      },
+      "required": ["card", "due"]
+    }
+  },
+  {
+    "name": "archive",
+    "description": "Archive (close) an existing card without deleting it.",
+    "triggers": ["archive", "archive card", "archive the card", "delete card", "delete the card", "close card", "close the card"],
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "card": {"type": "string", "description": "The card to archive, as the user described it."}
+      },
+      "required": ["card"]
+    }
+  },
+  {
+    "name": "query",
+    "description": "Show the open cards on the board: questions like 'what cards do I have?', 'what do I have to do?', 'show my cards'.",
+    "triggers": ["show cards", "show my cards", "list cards", "my cards", "what cards", "which cards", "how many cards", "what do i have to do", "what are my tasks", "open cards"],
+    "input_schema": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+]

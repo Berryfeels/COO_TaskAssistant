@@ -200,6 +200,11 @@ class TestCompleteRequest(unittest.TestCase):
         # the prompt demands plain words, not JSON, from the model
         self.assertIn("NEVER output JSON", prompt)
         self.assertIn("action:", prompt)
+        # and embeds the actions_list.txt catalogue: the LLM may only pick
+        # actions from that list, never invent them
+        self.assertIn("actions_list.txt", prompt)
+        self.assertIn("add_card", prompt)
+        self.assertIn("query", prompt)
         self.assertEqual(body["messages"][-1],
                          {"role": "user", "content": "ciao"})
         # no response_format: combined with tools it loops forever (see code)

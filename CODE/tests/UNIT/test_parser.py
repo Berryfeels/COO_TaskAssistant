@@ -221,15 +221,51 @@ class TestDates(ParserCase):
             self.due("sometime soon")
 
 
-class TestFreeTextFallback(ParserCase):
-    def test_italian_add_phrase_detected(self):
-        c = self.parse('aggiungi una scheda "Call supplier"')
-        self.assertEqual(c.action, Action.add_card)
-        self.assertEqual(c.title, "Call supplier")
+class TestActionCatalogue(ParserCase):
+    """The action comes ONLY from actions_list.txt, matched deterministically;
+    below 75% (or ambiguous) the user is asked to confirm - never guessed."""
 
-    def test_italian_query_phrase_detected(self):
+    def test_catalogue_is_loaded_from_actions_list_file(self):
+        names = {a["name"] for a in self.p.actions}
+        self.assertEqual(names, {"add_card", "add_list", "update", "complete",
+                                 "move_date", "archive", "query"})
+
+    def test_exact_catalogue_name_matches(self):
+        c = self.parse("action: add_card\ntitle: X")
+        self.assertEqual(c.action, Action.add_card)
+
+    def test_trigger_from_catalogue_matches(self):
+        self.trello.cards = [{"id": "c1", "name": "Call supplier",
+                              "closed": False}]
+        c = self.parse("action: mark as done\ncard: Call supplier")
+        self.assertEqual(c.action, Action.complete)
+        self.assertEqual(c.target_card_id, "c1")
+
+    def test_longest_trigger_wins_ties(self):
+        # "move card" (update) beats "done" (complete): more specific phrase
+        action, score, _ = self.p._match_action("move card to done")
+        self.assertEqual(action, Action.update)
+        self.assertEqual(score, 1.0)
+
+    def test_below_75_percent_asks_the_user_to_confirm(self):
+        with self.assertRaises(Clarification) as ctx:
+            self.parse("action: balla")
+        msg = str(ctx.exception)
+        self.assertIn("add_card", msg)          # the catalogue is listed
+        self.assertIn("Which one", msg)         # user must confirm, no guess
+
+    def test_unknown_action_never_invented(self):
+        with self.assertRaises(Clarification):
+            self.parse("action: inventa qualcosa\ntitle: X")
+
+    def test_no_action_line_means_chat_even_with_trigger_words(self):
+        c = self.parse('aggiungi una scheda "Call supplier"')
+        self.assertEqual(c.action, Action.chat)
+        self.assertIn("aggiungi", c.reply)
+
+    def test_italian_query_without_action_line_is_chat(self):
         c = self.parse("quali schede ho aperte?")
-        self.assertEqual(c.action, Action.query)
+        self.assertEqual(c.action, Action.chat)
 
 
 if __name__ == "__main__":

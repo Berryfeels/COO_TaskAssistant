@@ -5,8 +5,11 @@ per field (action:, title:, card:, assign:, due:, list:, note:, question:,
 reply:) or free prose for conversation. WordParser is the program logic that
 fills the JSON structure (the Card) from those words:
 
-- action  <- the action: line (controlled vocabulary), else keywords in the
-  free text, else chat
+- action  <- the action: line, matched DETERMINISTICALLY against the action
+  catalogue ./actions_list.txt (loaded at runtime, never hardcoded here).
+  The match is a similarity score: >= 75% -> that action; below 75% (or two
+  actions equally close) -> the user is asked to confirm, never guessed.
+  No action: line at all -> free conversation (chat)
 - title   <- the title: line, else the first quoted string in the text
 - card    <- the card: line, resolved against the open board cards
 - assign  <- names as the user said them, resolved to member IDs
@@ -15,25 +18,47 @@ fills the JSON structure (the Card) from those words:
   resolved in Europe/Berlin
 - question<- asked back to the user via Clarification instead of guessing
 
-Everything here is deterministic: names resolve against the board with fuzzy
-matching, dates resolve with app.dates, and anything ambiguous raises
-Clarification with ONE question listing the candidates (ambiguity policy,
-spec section 6). The LLM never handles Trello IDs.
+Everything here is deterministic: the action comes only from actions_list.txt,
+names resolve against the board with fuzzy matching, dates resolve with
+app.dates, and anything ambiguous raises Clarification with ONE question
+listing the candidates (ambiguity policy, spec section 6). The LLM never
+invents actions and never handles Trello IDs.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import unicodedata
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..config import settings
 from ..dates import resolve_relative
-from ..schema import Action, Card, Clarification
+from ..schema import Action, Card, Clarification, parse_action
 from ..similarity import similarity
 from ..trello.client import TrelloLike
 
 TZ = ZoneInfo(settings.timezone)
+
+# The action catalogue: repo-root actions_list.txt (override: ACTIONS_LIST_PATH)
+ACTIONS_FILE = Path(os.environ.get(
+    "ACTIONS_LIST_PATH",
+    str(Path(__file__).resolve().parents[3] / "actions_list.txt")))
+
+
+def load_actions(path: str | Path | None = None) -> list[dict]:
+    """Load and validate the action catalogue. Every entry's name must map
+    to a known Action (parse_action also accepts the legacy "create")."""
+    p = Path(path) if path is not None else ACTIONS_FILE
+    data = json.loads(p.read_text(encoding="utf-8"))
+    actions = []
+    for entry in data:
+        parse_action(entry.get("name", ""))      # raises ValueError if unknown
+        entry.setdefault("triggers", [])
+        actions.append(entry)
+    return actions
 
 # label on a line -> internal field ("title: X" / "titolo: X" -> title)
 _LABELS = {
@@ -91,6 +116,11 @@ def _split_names(value: str) -> list[str]:
 class WordParser:
     """Fills the Card JSON from the LLM's plain words. Deterministic."""
 
+    MATCH_THRESHOLD = 0.75      # action relation must reach +75%, else ask
+
+    def __init__(self, actions: list[dict] | None = None):
+        self.actions = actions if actions is not None else load_actions()
+
     # -- line splitting ---------------------------------------------------------
     def _split_fields(self, words: str) -> tuple[dict[str, str], list[str]]:
         fields: dict[str, str] = {}
@@ -106,49 +136,70 @@ class WordParser:
                 free.append(line.strip())
         return fields, free
 
-    # -- action detection ---------------------------------------------------------
-    def _action(self, action_value: str, text: str) -> Action | None:
-        """Action from the action: line; if absent/unrecognized, keywords in
-        the free text; None means free conversation (chat)."""
-        for source in (action_value, text if not action_value else ""):
-            if not source:
-                continue
-            a = self._action_from_text(source)
-            if a is not None:
-                return a
-        return None
+    # -- action detection: ONLY from the actions_list.txt catalogue ---------------
+    def _rank_actions(self, text: str) -> list[tuple[float, int, Action]]:
+        """Deterministic ranking of the action: words against the catalogue.
+        Each entry scores the max of the similarity against its
+        name/description/triggers; a trigger phrase found verbatim in the
+        text scores 1.0. Sorted by (score, longest matching trigger): the
+        most specific phrase wins ties."""
+        t = _norm(text)
+        ranked = []
+        if t:
+            for entry in self.actions:
+                name = _norm(entry.get("name", ""))
+                score = similarity(t, name) if name else 0.0
+                trig_len = 0
+                score = max(score, similarity(t, _norm(entry.get("description", ""))))
+                for tr in entry.get("triggers", []):
+                    tn = _norm(tr)
+                    if not tn:
+                        continue
+                    if tn in t:
+                        if len(tn) >= trig_len:
+                            score, trig_len = max(score, 1.0), len(tn)
+                    else:
+                        score = max(score, similarity(t, tn))
+                ranked.append((score, trig_len, parse_action(entry["name"])))
+        ranked.sort(key=lambda r: (r[0], r[1]), reverse=True)
+        return ranked
 
-    @staticmethod
-    def _action_from_text(t: str) -> Action | None:
-        t = t.casefold()
-        if re.search(r"\b(new|add|create|aggiungi|crea)\b", t) and \
-                re.search(r"\b(column|colonna|list|lista)\b", t):
-            return Action.add_list
-        if re.search(r"\b(move|sposta|cambia|reschedul|postpone)\b", t) and \
-                re.search(r"\b(date|due|deadline|scadenza|data)\b", t):
-            return Action.move_date
-        if re.search(r"\bmetti\b[^.\n]*\b(done|fatto|complet\w*)\b", t):
-            return Action.complete                    # "metti X in fatto"
-        if re.search(r"\b(move|sposta)\b", t):
-            return Action.update                      # move to a column
-        if re.search(r"\b(archiv\w*|delete|elimina\w*|close)\b", t):
-            return Action.archive
-        if re.search(r"\b(mark\w*|set\w*)\b[^.\n]*\bdone\b", t) or \
-                re.search(r"\b(done|complet\w*|fatto|finisc\w*)\b", t):
-            return Action.complete
-        if re.search(r"\b(add|create|new|aggiungi|crea|note\s*down)\b[^.\n]*"
-                     r"\b(card|task|to-?do|reminder|scheda)\b", t) or \
-                re.search(r"\b(aggiungi|crea)\b", t):
-            return Action.add_card
-        if re.search(r"\b(show|list|what|which|quali|cosa|how many)\b[^.\n]*"
-                     r"\b(cards?|tasks?|schede|to-?dos?)\b", t) or \
-                re.search(r"\bmy\s+cards\b", t):
-            return Action.query
-        if re.search(r"\b(update|change|edit|rename|modifica\w*)\b", t):
-            return Action.update
-        if re.search(r"\b(chat|talk|reply|answer|greet\w*)\b", t):
-            return Action.chat
-        return None
+    def _match_action(self, text: str) -> tuple[Action | None, float, float]:
+        """(best_action, best_score, second_score) for the action: words."""
+        ranked = self._rank_actions(text)
+        if not ranked:
+            return None, 0.0, 0.0
+        second = ranked[1] if len(ranked) > 1 else (0.0, 0, None)
+        return ranked[0][2], ranked[0][0], second[0]
+
+    def _decide_action(self, text: str) -> Action:
+        """The one action the action: words relate to, or a Clarification
+        asking the user to confirm. >= 75% proceeds; below, or two actions
+        equally close without a more specific trigger, asks - never guesses."""
+        ranked = self._rank_actions(text)
+        if not ranked:
+            raise Clarification(self._action_question(None, 0.0))
+        best = ranked[0]
+        second = ranked[1] if len(ranked) > 1 else None
+        if best[0] < self.MATCH_THRESHOLD:
+            raise Clarification(self._action_question(best[2], best[0]))
+        if second and second[0] >= self.MATCH_THRESHOLD \
+                and best[0] - second[0] < 0.1 and second[1] >= best[1]:
+            raise Clarification(self._action_question(best[2], best[0]))
+        return best[2]
+
+    def _action_question(self, best: Action | None, score: float) -> str:
+        """Below-threshold or ambiguous match: ask the USER to confirm which
+        action is meant, listing the catalogue. Never guess."""
+        opts = "\n".join(f"- {a['name']}: {a.get('description', '')}"
+                         for a in self.actions)
+        if best is not None:
+            head = (f"I am not sure which action you mean "
+                    f"(best match '{best.value}', {score:.0%}): "
+                    f"do you confirm '{best.value}'?")
+        else:
+            head = "I could not relate that to any action."
+        return head + "\nAvailable actions:\n" + opts + "\nWhich one do you mean?"
 
     # -- name -> ID resolution (deterministic, against the board) -----------------
     def _resolve_member(self, name: str, members: list[dict]) -> str:
@@ -269,7 +320,13 @@ class WordParser:
         if fields.get("question"):
             raise Clarification(fields["question"])
 
-        action = self._action(fields.get("action", ""), text)
+        # The action comes ONLY from the action: line, verified against the
+        # actions_list.txt catalogue. Below 75% (or ambiguous) the user is
+        # asked to confirm - the parser never invents or assumes an action.
+        # No action: line -> free conversation (chat).
+        action = None
+        if fields.get("action"):
+            action = self._decide_action(fields["action"])
         source = str(user.get("source_message_id", ""))
 
         # free conversation: the LLM's words ARE the chat reply
