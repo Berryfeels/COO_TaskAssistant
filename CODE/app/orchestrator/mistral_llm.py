@@ -87,7 +87,7 @@ Rules:
   action: line at all - your words become the chat reply.
 Today is {today} ({weekday}, Europe/Berlin).
 """
-
+# -- framing of the incoming user enquiries for a more effiient LLM interpretation
 _TOOLS = [
     {"type": "function", "function": {
         "name": "board_cards",

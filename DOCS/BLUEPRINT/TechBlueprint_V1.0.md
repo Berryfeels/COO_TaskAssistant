@@ -20,9 +20,9 @@ A digital COO executive assistant. It engages with the team's Trello board autom
 ### 2.1 Flow
 
 1. **Message in.** A SimpleX chat event arrives. If it is audio, it is transcribed to text.
-2. **Pipeline.** FIFO queue → idempotency check → legacy confirmation match → Orchestrator LLM (intent + extraction via function calling).
-3. **Orchestrator output.** The LLM returns a tool call whose arguments use names *as the user said them* (list name, member name, label name). The LLM never handles Trello IDs.
-4. **Validation and resolution (deterministic code).** Validates the tool call against its schema and against the board state, resolves names to IDs with fuzzy matching using the cached board structure (2.4), and returns clear errors to the LLM when something does not match.
+2. **Pipeline.** FIFO queue → idempotency check → legacy confirmation match → Orchestrator LLM (intent + extraction).
+3. **Orchestrator output.** The LLM answers in **plain words, never JSON**: for a board action, one labelled line per field (`action:`, `title:`, `card:`, `assign:`, `due:`, `list:`, `note:`, `question:`) using names *as the user said them* (list name, member name, card name); for pure conversation, free prose with no `action:` line. Function calling is used only for the read tools (`board_cards`, `search_cards`, `get_card`, `list_members`, `list_lists`). The LLM never handles Trello IDs.
+4. **Validation and resolution (deterministic code).** The parser fills the `Card` JSON from the LLM's words, matches the `action:` line against the catalogue `./actions_list.txt` (≥ 75% similarity selects the action; below, or two equally close, ONE clarifying question to the user — see 2.3), validates against the schema and the board state, resolves names to IDs with fuzzy matching using the cached board structure (2.4), and returns clear errors to the LLM when something does not match.
 5. **Write step.** Deterministic code builds the Trello API call and executes it. The API response confirms the outcome.
 6. **After success.** The local DB is updated, `mark_processed` is called, and the bot sends a confirmation message to the user (e.g. "Done: 'Call supplier' card has been created.").
 7. **Monitoring.** A scheduler regularly checks upcoming due dates and notifies the people involved through SimpleX.
@@ -30,17 +30,17 @@ A digital COO executive assistant. It engages with the team's Trello board autom
 ### 2.2 Components
 
 - **SimpleX Gateway (in/out):** the real message entry point.
-- **LLM Agent:** a catalogue of tools, each mapped to one or more Trello actions. Tool names and descriptions are written in human terms; the description is where "human wording ↔ Trello action" lives. The catalogue is `./actions_list.txt`, loaded at runtime as the function-calling tool definitions (see 4.1).
+- **LLM Agent:** answers in plain words. For a board action it picks one action from the catalogue `./actions_list.txt` (loaded at runtime, embedded in the system prompt, matched deterministically by the parser — see 2.3 and 4.1) and writes one labelled line per field with names as the user said them. Catalogue names and descriptions are written in human terms; the description is where "human wording ↔ Trello action" lives. The read tools (`board_cards`, `list_members`, `list_lists`, `search_cards`, `get_card`) remain function-calling tools.
 - **Validation layer (deterministic):** schema validation, name → ID resolution, board-state checks, rate limiting and retries.
 - **Scheduler:** deadline reminders (see 4.4).
 - **Notification builder:** composes all outgoing SimpleX messages.
 - **Shared SQLite DB:** user mapping, processed message IDs, pending actions, FIFO queue, reminders sent, per-user conversation history, board structure cache (lists, members, labels with their IDs; see 2.4).
 
-Example of a tool:
+Example of a catalogue entry (`add_card` in `./actions_list.txt`):
 
 ```json
 {
-  "name": "create_card",
+  "name": "add_card",
   "description": "Create a new task. Use when the user asks to add, create, note down, or remind about something to do.",
   "input_schema": {
     "properties": {
@@ -114,7 +114,7 @@ A full mirror of the cards in SQLite (initial sync, webhook events, periodic res
 
 Message-ID idempotency cannot catch a card the user forgot about and prompts again with different wording. The guard makes the user aware in the outcome message.
 
-- **Scope.** Only `create_card` actions. On every `create_card`, the pipeline compares the new title against (a) the user's active pending `create_card` actions and (b) every open card on the board.
+- **Scope.** Only `add_card` actions. On every `add_card`, the pipeline compares the new title against (a) the user's active pending `add_card` actions and (b) every open card on the board.
 - **Method.** Deterministic, no LLM. Open cards are read from Trello with a GET; titles are normalized (casefold, punctuation stripped, whitespace collapsed) and compared with a sequence-similarity ratio. A ratio >= 0.75 counts as a near-duplicate.
 - **Behavior.** Hits are appended to the confirmation message as a heads-up, e.g. *"Heads-up: similar card(s) found: 'Prepare dairy-free cake' (already on the board). Check whether this is a duplicate."* The guard never blocks and never writes.
 - **Limits.** Title similarity only: heavily reworded paraphrases with different vocabulary may fall under the threshold. Semantic dedupe (embeddings or LLM-side matching) is a possible later extension.
@@ -124,7 +124,7 @@ Message-ID idempotency cannot catch a card the user forgot about and prompts aga
 ### 4.1 Integration: can everything go through the API?
 
 - Full index of Trello endpoints: `./trello_index.txt` (generated from Trello's OpenAPI spec). Development reference only: it is the map used to decide which actions to support, and is not loaded at runtime.
-- Curated catalogue of the actions the LLM can choose from: `./actions_list.txt` (tool definitions: name, human-language description, input schema; see 2.2). Loaded at runtime as the function-calling tools. It contains only the supported actions and is kept short to save tokens.
+- Curated catalogue of the actions the LLM can choose from: `./actions_list.txt` (entries: name, human-language description, trigger phrases, input schema; see 2.2 and 2.3). Loaded at runtime: embedded in the LLM system prompt (the LLM may choose only these actions) and used by the deterministic parser to match the action (≥ 75% similarity, else one clarifying question — see 2.3). It contains only the supported actions — the seven listed in 2.3 — and is kept short to save tokens.
 - Webhook action types and rate limits (not covered by the OpenAPI spec): kept in a separate development note, e.g. `./trello_notes.md`.
 
 ### 4.2 Authentication
