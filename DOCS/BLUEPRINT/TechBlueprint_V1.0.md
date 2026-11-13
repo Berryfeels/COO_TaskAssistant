@@ -58,11 +58,27 @@ Example of a tool:
 
 ### 2.3 JSON validation (deterministic)
 
-- Validate the LLM's tool call against the tool schema.
+- The parser fills the JSON (the `Card`) from the LLM's plain words and validates it against the action catalogue and the tool schema — the LLM never emits JSON.
 - Resolve names to IDs (members, lists, labels) from the cached board structure (2.4), with fuzzy matching.
 - Validate against the board state: does this list exist? is this member on the board?
 - Return clear errors to the LLM so it can self-correct in one retry, e.g. `no list called 'Doing'; available: To Do, In Progress, Done`.
 - Respect rate limits and retry transient failures.
+
+**The supported actions.** Exactly the seven in the catalogue `./actions_list.txt` (loaded at runtime, see 4.1). The LLM may choose only among these — it never invents an action:
+
+| Action | Does | Key fields |
+| --- | --- | --- |
+| `add_card` | Create a new card on the board (`POST /cards`) | `title` (required), `list`, `members`, `due`, `labels`, `description` |
+| `add_list` | Create a new column on the board (`POST /lists`) | `title` (the column name) |
+| `update` | Modify an existing card (`PUT /cards/{id}`): title, notes, assignees, due, or move it to another column | `card` (required); then only the fields to change |
+| `complete` | Mark a card as done: `dueComplete=true` and move it to the Done column | `card` (required) |
+| `move_date` | Change only the due date of an existing card | `card` (required), `due` (required) |
+| `archive` | Archive (close) a card via `PUT closed=true` — not delete | `card` (required) |
+| `query` | Read-only: list the open cards on the board | — |
+
+Free conversation (`chat`) is not an action: it is the *absence* of an action in the LLM's answer.
+
+**Action matching is deterministic.** The action named by the LLM is matched against the catalogue (name, description, trigger phrases; similarity ratio): a match of **>= 75%** selects that action; below 75%, or two actions equally close, the bot asks the user ONE clarifying question listing the catalogue entries — it never guesses. The parser then fills the `Card` JSON from the LLM's words and resolves names to IDs as above.
 
 ### 2.4 Board structure cache (IDs of lists, members, labels)
 
