@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 from ..config import settings
 from ..dates import resolve_relative
 from ..schema import Action, Card, Clarification, parse_action
-from ..similarity import similarity
+from ..similarity import is_similar, similarity
 from ..trello.client import TrelloLike
 
 TZ = ZoneInfo(settings.timezone)
@@ -211,9 +211,35 @@ class WordParser:
             tokens = _norm(m.get("fullName", "")).split()
             if tokens and (n == tokens[0] or n in tokens):
                 return m.get("id", "")
+        # prefix / fuzzy first-name match: "rob" -> "Robert"
+        for m in members:
+            tokens = _norm(m.get("fullName", "")).split()
+            if tokens and ((len(n) >= 3 and tokens[0].startswith(n))
+                           or (len(n) >= 4 and is_similar(tokens[0], n))):
+                return m.get("id", "")
         available = ", ".join(m.get("fullName", "?") for m in members) or "none"
         raise Clarification(f"'{name}' is not a member of this board. "
                             f"Members: {available}")
+
+    def _members_in_text(self, text: str, members: list[dict]) -> list[dict]:
+        """Board members mentioned in the raw user text (deterministic):
+        full name, any name token, a >=3-char prefix of the first token
+        ("rob" -> "Robert") or a fuzzy first-token match."""
+        t = _norm(text)
+        tokens = set(t.split())
+        found: list[dict] = []
+        for m in members:
+            name = _norm(m.get("fullName", ""))
+            ntokens = name.split()
+            if not ntokens:
+                continue
+            first = ntokens[0]
+            hit = (name in t) or any(tok in ntokens for tok in tokens) \
+                or any(len(tok) >= 3 and first.startswith(tok) for tok in tokens) \
+                or any(len(tok) >= 4 and is_similar(first, tok) for tok in tokens)
+            if hit and m not in found:
+                found.append(m)
+        return found
 
     def _resolve_list(self, name: str, lists: list[dict]) -> str:
         n = _norm(name)
@@ -309,9 +335,11 @@ class WordParser:
 
     # -- main entry point -----------------------------------------------------------
     def parse(self, words: str, user: dict, today: datetime,
-              trello: TrelloLike) -> Card:
+              trello: TrelloLike, raw_text: str = "") -> Card:
         """Turn the LLM's plain words into the Card JSON. Raises
-        Clarification (one question) whenever something is ambiguous."""
+        Clarification (one question) whenever something is ambiguous.
+        `raw_text` is the user's original message: used for the
+        deterministic assignee fallback on add_card."""
         text = (words or "").strip()
         if not text:
             raise Clarification("I did not understand. Can you rephrase?")
@@ -365,6 +393,18 @@ class WordParser:
             members = trello.list_members()
             card.assignees = [self._resolve_member(n, members)
                               for n in _split_names(fields["assign"])]
+        elif action == Action.add_card and raw_text:
+            # deterministic safety net: the LLM may put "for Rob" / "per Rob"
+            # in prose instead of an assign: line - a new task that names a
+            # board member must never be created unassigned
+            mentioned = self._members_in_text(raw_text, trello.list_members())
+            if len(mentioned) == 1:
+                card.assignees = [mentioned[0].get("id", "")]
+            elif len(mentioned) > 1:
+                names = ", ".join(m.get("fullName", "?") for m in mentioned)
+                raise Clarification(
+                    f"Who should this card be assigned to? "
+                    f"Members mentioned: {names}")
 
         if fields.get("list"):
             card.list_id = self._resolve_list(fields["list"],

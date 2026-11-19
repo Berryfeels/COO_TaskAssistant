@@ -53,6 +53,7 @@ async def main_async() -> None:
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    from app.audio.mistral_stt import MistralSTT
     from app.config import settings
     from app.confirm.pending import PendingService
     from app.gateway.onboarding import Onboarding
@@ -68,8 +69,28 @@ async def main_async() -> None:
                           default_list_id=settings.trello_default_list_id)
     llm = MistralLLM(api_key=settings.mistral_api_key,
                      model=settings.mistral_model)
+    stt = MistralSTT(api_key=settings.mistral_api_key,
+                     model=settings.mistral_stt_model)
     pending = PendingService(db, settings)
     gateway = SimpleXGateway(settings.simplex_ws_url)
+
+    async def transcribe(payload: dict) -> str:
+        """Speech-to-text hook for the SimpleX gateway: download the voice
+        file from the CLI, then transcribe it with Mistral (Voxtral). Swap
+        this callable for the chatBHT STT service when it is embedded - the
+        gateway itself does not change. `payload` is the media item:
+        {"msgContent": {...}, "file": {"fileId": ..., ...}}."""
+        f = payload.get("file") or {}
+        file_id = f.get("fileId") or f.get("file_id")
+        if not file_id:
+            raise ValueError("voice message carries no file reference "
+                             f"(keys: {sorted(payload.get('msgContent') or {})})")
+        path = await gateway.receive_file(str(file_id),
+                                          file_name=f.get("fileName"),
+                                          file_size=f.get("fileSize"))
+        return stt.transcribe_file(path)
+
+    gateway.transcriber = transcribe
     pipeline = Pipeline(db, trello, llm, pending, gateway, settings)
     gateway.pipeline = pipeline
     gateway.admit = Onboarding(db, trello, gateway).admit
@@ -80,6 +101,15 @@ async def main_async() -> None:
 
 def main() -> int:
     load_dotenv()
+    from app.config import missing_required, settings
+    missing = missing_required(settings)
+    if missing:
+        # fail fast: with empty Trello/Mistral settings the bot starts fine
+        # but every board call fails later with a bare HTTPError 400
+        print("COO assistant: missing required settings: " + ", ".join(missing))
+        print("Set them in CODE/.env (git-ignored, see CODE/README.md) "
+              "or export them, then restart.")
+        return 2
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:

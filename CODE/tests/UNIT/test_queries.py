@@ -37,7 +37,9 @@ class TestQueries(unittest.TestCase):
     def test_llm_failure_gets_a_reply_not_silence(self):
         h = make_pipeline(script=[ConnectionError("network down")])
         incoming(h.pipe, "u", "m1", "my cards")
-        self.assertIn("something went wrong", last_reply(h.gateway))
+        msg = last_reply(h.gateway)
+        self.assertIn("network down", msg)          # the problem is stated first
+        self.assertIn("Nothing was written", msg)
         self.assertEqual(h.trello.calls, [])
 
 

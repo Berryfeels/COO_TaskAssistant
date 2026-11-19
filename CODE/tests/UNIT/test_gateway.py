@@ -134,6 +134,273 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(self.fp.calls, [("Stefano", "345", "via raw")])
 
 
+class TestMediaHandling(unittest.TestCase):
+    """The STT seam: non-text messages are surfaced by _extract_media and
+    handled by _handle_media - either through the transcriber hook (phase 5)
+    or, without one, with a plain "text only for now" reply (never silent)."""
+
+    def voice_event(self, nest_in_msg_content=False):
+        # real CLI shape: the file reference is a SIBLING of "content" on the
+        # chatItem; the msgContent of a voice message is just
+        # {"type": "voice", "text": "", "duration": N}
+        ev = chat_event()
+        item = ev["chatItems"][0]["chatItem"]
+        item["content"]["msgContent"] = {"type": "voice", "text": "",
+                                         "duration": 4}
+        f = {"fileId": 77, "fileName": "voice_20261116_192414.m4a",
+             "fileSize": 49479, "fileStatus": {"type": "rcvInvitation"}}
+        if nest_in_msg_content:
+            item["content"]["msgContent"]["file"] = f
+        else:
+            item["file"] = f
+        return ev
+
+    def setUp(self):
+        self.g = SimpleXGateway("ws://fake")
+        self.fp = FakePipeline()
+        self.g.pipeline = self.fp
+
+    def test_media_extracted_separately_from_text(self):
+        ev = self.voice_event()
+        self.assertEqual(self.g._extract_incoming(ev), [])
+        media = self.g._extract_media(ev)
+        self.assertEqual(len(media), 1)
+        user_id, message_id, kind, payload = media[0]
+        self.assertEqual((user_id, message_id, kind),
+                         ("Stefano", "345", "voice"))
+        self.assertEqual(payload["file"]["fileId"], 77)
+        self.assertEqual(payload["msgContent"]["type"], "voice")
+
+    def test_file_nested_in_msg_content_still_found(self):
+        media = self.g._extract_media(self.voice_event(nest_in_msg_content=True))
+        self.assertEqual(media[0][3]["file"]["fileId"], 77)
+
+    def test_voice_without_transcriber_gets_text_only_reply(self):
+        asyncio.run(self.g.on_chat_event(self.voice_event()))
+        self.assertEqual(self.fp.calls, [])            # pipeline untouched
+        self.assertEqual(len(self.g.sent), 1)
+        self.assertIn("only read text", self.g.sent[0][1])
+
+    def test_voice_with_transcriber_feeds_transcript_to_pipeline(self):
+        async def stt(payload):
+            assert payload["msgContent"]["type"] == "voice"
+            assert payload["file"]["fileId"] == 77
+            return "add a card: call supplier"
+        self.g.transcriber = stt
+        asyncio.run(self.g.on_chat_event(self.voice_event()))
+        self.assertEqual(self.fp.calls,
+                         [("Stefano", "345", "add a card: call supplier")])
+        self.assertEqual(self.g.sent, [])              # no text-only reply
+
+    def test_transcriber_respects_admit_gate(self):
+        async def stt(mc):
+            return "Stefano"
+        async def deny(user_id, message_id, text):
+            return False
+        self.g.transcriber = stt
+        self.g.admit = deny
+        asyncio.run(self.g.on_chat_event(self.voice_event()))
+        self.assertEqual(self.fp.calls, [])            # gate consumed it
+
+    def test_transcriber_failure_replies_error_not_silence(self):
+        async def stt(mc):
+            raise RuntimeError("whisper crashed")
+        self.g.transcriber = stt
+        asyncio.run(self.g.on_chat_event(self.voice_event()))
+        self.assertEqual(self.fp.calls, [])
+        self.assertIn("could not transcribe", self.g.sent[-1][1])
+
+    def test_empty_transcript_replies_not_silence(self):
+        async def stt(mc):
+            return "   "
+        self.g.transcriber = stt
+        asyncio.run(self.g.on_chat_event(self.voice_event()))
+        self.assertEqual(self.fp.calls, [])
+        self.assertIn("could not understand", self.g.sent[-1][1])
+
+    def test_media_handling_does_not_block_the_read_loop(self):
+        """Regression test for the self-deadlock: _handle_media awaits
+        receive_file, which waits for an rcvFileComplete FRAME on the same
+        socket. If on_chat_event awaited media handling inline, the read loop
+        (async for raw in ws) would be blocked and the frame could never be
+        read -> timeout. Media handling must run as a background task."""
+        conn = FakeConn([], {"connects": 0})
+
+        async def stt(payload):
+            # transcriber downloads the file via the gateway: this waits for
+            # a frame that only the (unblocked) read loop can deliver
+            path = await self.g.receive_file(
+                str(payload["file"]["fileId"]))
+            return f"transcribed:{path}"
+
+        self.g._ws = conn
+        self.g.transcriber = stt
+
+        async def scenario():
+            # voice message arrives: on_chat_event must return immediately,
+            # leaving the media work in a background task
+            await self.g.on_chat_event(self.voice_event())
+            self.assertEqual(self.fp.calls, [])
+            self.assertEqual(len(self.g._tasks), 1)
+            await asyncio.sleep(0)               # let the task reach /freceive
+            await asyncio.sleep(0)
+            cmd = json.loads(conn.sent[0])
+            self.assertEqual(cmd["cmd"], "/freceive 77")
+            # command response + completion frame arrive while the media
+            # task is still pending - the loop is NOT blocked
+            await self.g._on_raw(json.dumps(
+                {"corrId": cmd["corrId"], "resp": {"type": "cmdOk"}}))
+            await self.g._on_raw(json.dumps({"resp": {
+                "type": "rcvFileComplete",
+                "chatItem": {"chatItem": {"file": {
+                    "fileId": 77,
+                    "fileStatus": {"type": "rcvComplete"},
+                    "filePath": "/tmp/v.m4a"}}}}}))
+            await asyncio.gather(*list(self.g._tasks))
+            return None
+
+        asyncio.run(scenario())
+        self.assertEqual(self.fp.calls,
+                         [("Stefano", "345", "transcribed:/tmp/v.m4a")])
+
+
+class TestReceiveFile(unittest.TestCase):
+    """receive_file(): /freceive <fileId> over the socket, then the CLI
+    reports the downloaded file's local path in a chat item (fileStatus
+    rcvComplete + filePath) - that path resolves the waiter."""
+
+    def setUp(self):
+        self.g = SimpleXGateway("ws://fake")
+        self.g.pipeline = FakePipeline()
+        self.conn = FakeConn([], {"connects": 0})
+        self.g._ws = self.conn
+
+    def test_receive_file_sends_freceive_and_resolves_on_rcv_file_complete(self):
+        # the real v7 event: {"resp": {"type": "rcvFileComplete",
+        #   "chatItem": {"chatInfo": ..., "chatItem": {..., "file": {...}}}}}
+        async def scenario():
+            task = asyncio.ensure_future(self.g.receive_file("77"))
+            await asyncio.sleep(0)                 # let the command go out
+            cmd = json.loads(self.conn.sent[0])
+            self.assertEqual(cmd["cmd"], "/freceive 77")
+            self.assertIn("corrId", cmd)
+            await self.g._on_raw(json.dumps(
+                {"corrId": cmd["corrId"], "resp": {"type": "cmdOk"}}))
+            ev = {"type": "rcvFileComplete",
+                  "chatItem": {"chatInfo": {"type": "direct"},
+                               "chatItem": {
+                                   "chatDir": {"type": "directRcv"},
+                                   "meta": {"itemId": 345},
+                                   "content": {"type": "rcvMsgContent",
+                                               "msgContent": {"type": "voice"}},
+                                   "file": {"fileId": 77,
+                                            "fileName": "voice.m4a",
+                                            "fileStatus": {"type": "rcvComplete"},
+                                            "filePath": "/tmp/simplex/voice_77.m4a"}}}}
+            await self.g._on_raw(json.dumps({"resp": ev}))
+            return await task
+        path = asyncio.run(scenario())
+        self.assertEqual(path, "/tmp/simplex/voice_77.m4a")
+
+    def test_receive_file_also_resolves_from_new_chat_items(self):
+        async def scenario():
+            task = asyncio.ensure_future(self.g.receive_file("77"))
+            await asyncio.sleep(0)
+            cmd = json.loads(self.conn.sent[0])
+            await self.g._on_raw(json.dumps(
+                {"corrId": cmd["corrId"], "resp": {"type": "cmdOk"}}))
+            ev = chat_event()
+            item = ev["chatItems"][0]["chatItem"]
+            item["file"] = {"fileId": 77, "fileStatus": "rcvComplete",
+                            "filePath": "/tmp/simplex/v2.m4a"}
+            await self.g._on_raw(json.dumps({"resp": ev}))
+            return await task
+        self.assertEqual(asyncio.run(scenario()), "/tmp/simplex/v2.m4a")
+
+    def test_file_path_nested_in_file_source_resolves(self):
+        # v7 shape: chatItem.file.fileSource.filePath (not file.filePath)
+        async def scenario():
+            task = asyncio.ensure_future(self.g.receive_file("77"))
+            await asyncio.sleep(0)
+            cmd = json.loads(self.conn.sent[0])
+            await self.g._on_raw(json.dumps(
+                {"corrId": cmd["corrId"], "resp": {"type": "cmdOk"}}))
+            await self.g._on_raw(json.dumps({"resp": {
+                "type": "rcvFileComplete",
+                "chatItem": {"chatItem": {"file": {
+                    "fileId": 77,
+                    "fileStatus": {"type": "rcvComplete"},
+                    "fileSource": {"type": "rcvFile",
+                                   "filePath": "/tmp/simplex/nested.m4a"}}}}}}))
+            return await task
+        self.assertEqual(asyncio.run(scenario()), "/tmp/simplex/nested.m4a")
+
+    def test_filesystem_poll_resolves_when_no_event_arrives(self):
+        # belt-and-suspenders: the CLI downloads the file but the bot never
+        # sees a completion event - the poll for fileName+fileSize finds it
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as dl:
+            target = os.path.join(dl, "voice_poll.m4a")
+            with open(target, "wb") as fh:
+                fh.write(b"x" * 4321)
+            self.g._poll_dirs = [dl]
+
+            async def scenario():
+                task = asyncio.ensure_future(
+                    self.g.receive_file("91", file_name="voice_poll.m4a",
+                                        file_size=4321, timeout=5.0))
+                await asyncio.sleep(0)
+                cmd = json.loads(self.conn.sent[0])
+                await self.g._on_raw(json.dumps(
+                    {"corrId": cmd["corrId"], "resp": {"type": "cmdOk"}}))
+                return await task          # no rcvFileComplete ever sent
+            self.assertEqual(asyncio.run(scenario()), target)
+
+    def test_relative_file_path_resolved_against_downloads(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as dl:
+            target = os.path.join(dl, "voice_rel.m4a")
+            open(target, "wb").write(b"x")
+            async def scenario():
+                task = asyncio.ensure_future(self.g.receive_file("88"))
+                await asyncio.sleep(0)
+                cmd = json.loads(self.conn.sent[0])
+                await self.g._on_raw(json.dumps(
+                    {"corrId": cmd["corrId"], "resp": {"type": "cmdOk"}}))
+                await self.g._on_raw(json.dumps({"resp": {
+                    "type": "rcvFileComplete",
+                    "chatItem": {"chatItem": {"file": {
+                        "fileId": 88, "fileStatus": {"type": "rcvComplete"},
+                        "filePath": "voice_rel.m4a"}}}}}))
+                return await task
+            # point ~/Downloads resolution at our temp dir via cwd fallback:
+            # relative name not in cwd -> try ~/Downloads; here we just check
+            # the raw relative path is returned when it exists nowhere
+            path = asyncio.run(scenario())
+            self.assertEqual(path, "voice_rel.m4a")
+
+    def test_receive_file_times_out_without_path_event(self):
+        async def scenario():
+            return await self.g.receive_file("99", timeout=0.05)
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(scenario())
+
+    def test_cmd_response_resolves_waiter(self):
+        async def scenario():
+            task = asyncio.ensure_future(self.g._send_cmd("/version"))
+            await asyncio.sleep(0)
+            cmd = json.loads(self.conn.sent[0])
+            self.assertEqual(cmd["cmd"], "/version")
+            await self.g._on_raw(json.dumps(
+                {"corrId": cmd["corrId"],
+                 "resp": {"type": "versionInfo", "version": "7.0.0"}}))
+            return await task
+        resp = asyncio.run(scenario())
+        self.assertEqual(resp["version"], "7.0.0")
+
+
 class TestSend(unittest.TestCase):
     def test_send_records_and_pushes_to_socket(self):
         g = SimpleXGateway("ws://fake")

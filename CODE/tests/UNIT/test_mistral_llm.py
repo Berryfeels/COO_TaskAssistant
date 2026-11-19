@@ -90,6 +90,112 @@ class TestCallTool(unittest.TestCase):
             self.llm._call_tool("delete_everything", {}, self.trello)
 
 
+class TestUnknownToolRecovery(unittest.TestCase):
+    """The model sometimes calls an ACTION name (e.g. "archive") as if it were
+    a tool. That must be a soft tool error the model can self-correct from,
+    never a crash; only if it keeps failing does the user get a problem-first
+    message ('The tool "archive" is unknown, sorry. ...')."""
+
+    def setUp(self):
+        self.llm = llm()
+        self.trello = FakeTrello()
+        self.trello.cards = [{"id": "c9", "name": "Fusking task", "closed": False}]
+        self.user = {"user_id": "u", "source_message_id": "m1"}
+
+    def test_unknown_tool_is_answered_as_tool_error_and_llm_recovers(self):
+        record = []
+        responses = [
+            {"content": None, "tool_calls": [
+                {"id": "t1", "function": {"name": "archive",
+                                          "arguments": "{}"}}]},
+            {"content": "action: archive\ncard: the fusking task"},
+        ]
+        self.llm._complete = lambda messages: (
+            record.append([dict(m) for m in messages]), responses.pop(0))[1]
+        card = self.llm.interpret("Archive the fusking task", self.user,
+                                  self.trello)
+        # the model self-corrected: archive is an action on the action: line
+        self.assertEqual(card.action, Action.archive)
+        self.assertTrue(card.closed)
+        self.assertEqual(card.target_card_id, "c9")
+        # the unknown tool was answered as a tool error inside the loop
+        tool_msgs = [m for m in record[1] if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        payload = json.loads(tool_msgs[0]["content"])
+        self.assertIn("unknown tool", payload["error"])
+        self.assertIn("NOT", payload["hint"])
+
+    def test_repeated_unknown_tool_asks_the_user_problem_first(self):
+        bad = {"content": None, "tool_calls": [
+            {"id": "t", "function": {"name": "archive", "arguments": "{}"}}]}
+        self.llm._complete = lambda messages: bad
+        with self.assertRaises(Clarification) as ctx:
+            self.llm.interpret("Archive the fusking task", self.user,
+                               self.trello)
+        msg = ctx.exception.question
+        self.assertIn('The tool "archive" is unknown', msg)
+        self.assertIn("sorry", msg)
+        self.assertIn("Please write something else", msg)
+
+
+class TestToolFailureRecovery(unittest.TestCase):
+    """A failing READ tool (e.g. get_card called with a hallucinated ID ->
+    HTTP 400/404) must be a soft tool error the model can self-correct from,
+    never a crash of the whole interpretation."""
+
+    def setUp(self):
+        self.llm = llm()
+        self.trello = FakeTrello()
+        self.user = {"user_id": "u", "source_message_id": "m1"}
+
+    def test_failed_tool_is_answered_as_tool_error_and_llm_recovers(self):
+        def bad_get_card(card_id):
+            raise RuntimeError("HTTP Error 404: Not Found")
+        self.trello.get_card = bad_get_card
+        record = []
+        responses = [
+            {"content": None, "tool_calls": [
+                {"id": "t1", "function": {"name": "get_card",
+                                          "arguments": '{"card_id": "685404550a598d4edbc7fb"}'}}]},
+            {"content": "question: Which card do you mean? I only see names, not IDs."},
+        ]
+        self.llm._complete = lambda messages: (
+            record.append([dict(m) for m in messages]), responses.pop(0))[1]
+        with self.assertRaises(Clarification) as ctx:
+            self.llm.interpret("show me that card", self.user, self.trello)
+        self.assertIn("Which card do you mean?", ctx.exception.question)
+        tool_msgs = [m for m in record[1] if m.get("role") == "tool"]
+        payload = json.loads(tool_msgs[0]["content"])
+        self.assertIn("failed", payload["error"])
+        self.assertIn("invented IDs", payload["hint"])
+
+    def test_loop_exhaustion_with_tool_errors_reraises_the_error(self):
+        def bad_cards():
+            raise RuntimeError("HTTP Error 400: Bad Request")
+        self.trello.board_cards = bad_cards
+        bad = {"content": None, "tool_calls": [
+            {"id": "t", "function": {"name": "board_cards", "arguments": "{}"}}]}
+        self.llm._complete = lambda messages: bad
+        with self.assertRaises(RuntimeError) as ctx:
+            self.llm.interpret("my cards", self.user, self.trello)
+        self.assertIn("HTTP Error 400", str(ctx.exception))
+
+
+class TestAssigneeFallbackFromRawText(unittest.TestCase):
+    """'crea una task per marco' must end up with Marco as assignee even if
+    the LLM forgot the assign: line - the parser scans the raw user text."""
+
+    def test_member_in_raw_text_assigned_despite_missing_assign_line(self):
+        m = llm()
+        trello = FakeTrello()
+        m._complete = lambda messages: {
+            "content": "action: add_card\ntitle: Roll a joint"}
+        card = m.interpret("crea una task per marco: roll a joint",
+                           {"user_id": "u", "source_message_id": "m1"}, trello)
+        self.assertEqual(card.action, Action.add_card)
+        self.assertEqual(card.assignees, ["m2"])       # Marco Rossi
+
+
 class TestInterpretLoop(unittest.TestCase):
     def setUp(self):
         self.llm = llm()
@@ -124,7 +230,10 @@ class TestInterpretLoop(unittest.TestCase):
         card = self.llm.interpret("add X", self.user, self.trello)
         self.assertEqual(card.action, Action.add_card)
         self.assertEqual(card.title, "X")
-        self.assertEqual(self.trello.calls, [("board_cards",)])
+        # board_cards from the tool call + list_members from the assignee
+        # fallback scanning the raw user text (no member named in "add X")
+        self.assertEqual(self.trello.calls, [("board_cards",), ("list_members",)])
+        self.assertEqual(card.assignees, [])
         # the tool result was appended to the conversation before the answer
         tool_msgs = [m for m in record[1] if m.get("role") == "tool"]
         self.assertEqual(len(tool_msgs), 1)
@@ -205,6 +314,13 @@ class TestCompleteRequest(unittest.TestCase):
         self.assertIn("actions_list.txt", prompt)
         self.assertIn("add_card", prompt)
         self.assertIn("query", prompt)
+        # and the prompt forbids calling catalogue actions as tools
+        self.assertIn("NEVER tools", prompt)
+        self.assertIn("archive", prompt)
+        # forbids invented IDs and demands the assign: line for "task for X"
+        self.assertIn("NEVER invent", prompt)
+        self.assertIn("assign:", prompt)
+        self.assertIn("No markdown", prompt)
         self.assertEqual(body["messages"][-1],
                          {"role": "user", "content": "ciao"})
         # no response_format: combined with tools it loops forever (see code)

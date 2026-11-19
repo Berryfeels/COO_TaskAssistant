@@ -124,11 +124,16 @@ class TestEndToEndThroughGateway(unittest.TestCase):
         self.assertIsNone(db.user("Newbie"))
 
         deliver(gw, "Stefano", display="Newbie", item_id=2)
+        self.assertEqual(len(llm.calls), 0)                  # name is not a card
+        self.assertIn("Are you Stefano Di Puma?", gw.sent[-1][1])  # double-check
+        self.assertIsNone(db.user("Newbie"))                 # not mapped yet
+
+        deliver(gw, "yes", display="Newbie", item_id=3)
         self.assertIsNotNone(db.user("Newbie"))              # mapped to m1
         self.assertEqual(db.user("Newbie")["trello_member_id"], "m1")
-        self.assertEqual(len(llm.calls), 0)                  # name is not a card
+        self.assertEqual(len(llm.calls), 0)                  # "yes" is not a card
 
-        deliver(gw, "add: call the supplier", display="Newbie", item_id=3)
+        deliver(gw, "add: call the supplier", display="Newbie", item_id=4)
         self.assertEqual(len(llm.calls), 1)
         self.assertEqual(len(trello.cards), 1)
         self.assertEqual(sock.sent[-1]["cmd"],

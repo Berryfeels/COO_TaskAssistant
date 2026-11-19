@@ -20,8 +20,9 @@ class ParserCase(unittest.TestCase):
         self.trello = FakeTrello()
         self.user = {"user_id": "u", "source_message_id": "m1"}
 
-    def parse(self, words, trello=None):
-        return self.p.parse(words, self.user, TODAY, trello or self.trello)
+    def parse(self, words, trello=None, raw_text=""):
+        return self.p.parse(words, self.user, TODAY, trello or self.trello,
+                            raw_text=raw_text)
 
 
 class TestAddCard(ParserCase):
@@ -73,6 +74,49 @@ class TestAddCard(ParserCase):
     def test_add_card_without_title_asks(self):
         with self.assertRaises(Clarification):
             self.parse("action: add card")
+
+
+class TestAssigneeFallback(ParserCase):
+    """The LLM may write "for Rob" in prose instead of an assign: line. A new
+    task whose raw user text names exactly one board member must get that
+    member as assignee - deterministically, never created unassigned."""
+
+    def test_member_named_in_raw_text_is_assigned(self):
+        c = self.parse("action: add card\ntitle: Roll a joint",
+                       raw_text="crea una task per marco: roll a joint")
+        self.assertEqual(c.action, Action.add_card)
+        self.assertEqual(c.assignees, ["m2"])
+
+    def test_short_name_prefix_matches_member(self):
+        self.trello.members = [{"id": "mr", "fullName": "Robert"},
+                               {"id": "m1", "fullName": "Stefano Di Puma"}]
+        c = self.parse("action: add card\ntitle: X",
+                       raw_text="task per rob")
+        self.assertEqual(c.assignees, ["mr"])
+
+    def test_assign_line_wins_over_raw_text(self):
+        c = self.parse("action: add card\ntitle: X\nassign: Stefano",
+                       raw_text="per marco fare X")
+        self.assertEqual(c.assignees, ["m1"])
+
+    def test_no_member_named_no_assignee(self):
+        c = self.parse("action: add card\ntitle: Call the supplier",
+                       raw_text="add a card: call the supplier tomorrow")
+        self.assertEqual(c.assignees, [])
+
+    def test_several_members_named_asks_instead_of_guessing(self):
+        with self.assertRaises(Clarification) as ctx:
+            self.parse("action: add card\ntitle: X",
+                       raw_text="task for Stefano and Marco together")
+        self.assertIn("assigned to", str(ctx.exception))
+        self.assertIn("Stefano Di Puma", str(ctx.exception))
+        self.assertIn("Marco Rossi", str(ctx.exception))
+
+    def test_assign_short_name_resolves(self):
+        self.trello.members = [{"id": "mr", "fullName": "Robert"},
+                               {"id": "m1", "fullName": "Stefano Di Puma"}]
+        c = self.parse("action: add card\ntitle: X\nassign: Rob")
+        self.assertEqual(c.assignees, ["mr"])
 
 
 class TestChatAndQuery(ParserCase):

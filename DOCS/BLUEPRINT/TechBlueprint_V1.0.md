@@ -196,7 +196,7 @@ Status: **not yet implemented**. Purpose: tell the system about changes it did n
 
    ```bash
    cd CODE
-   python3 scripts/run_bot.py            # logs to stderr; use 2>&1 | tee bot.log to persist
+   python3 CODE/scripts/run_bot.py            # logs to stderr; use 2>&1 | tee bot.log to persist
    ```
 
 The bot connects to `SIMPLEX_WS_URL` (default `ws://127.0.0.1:5225`), restores persisted state from `DATABASE_PATH` (default `coo.db`: onboarded contacts, processed message IDs, pending actions, reminders sent, board structure cache), runs the `task_json → card_json` column migration in place on old DBs, and runs the scheduler loop for pending reminders and 24 h expiry. **Run exactly one bot instance**: the CLI delivers each chat event to one client only, so a second instance (or a debug listener) steals events. On restart, kill the old PID first.

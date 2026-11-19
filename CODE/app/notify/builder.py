@@ -45,7 +45,8 @@ def render_result(card: Card, api_card: dict,
     if card.action.value == "add_list":
         msg = f"Done: column '{name}' added to the board in Trello."
     else:
-        verb = "created" if card.action.value == "add_card" else "updated"
+        verb = {"add_card": "created", "archive": "archived"}.get(
+            card.action.value, "updated")
         msg = f"Done: '{name}' {verb} in Trello."
     if similar:
         msg += ("\nHeads-up: similar card(s) found: "
@@ -67,7 +68,8 @@ def render_invalid(card: Card, error: ValueError) -> str:
 
 
 def render_error(error: Exception) -> str:
-    return (f"Sorry, something went wrong handling that message ({error}). "
+    # the problem is declared FIRST, then the apology and the reassurance
+    return (f"Sorry: {error}. "
             f"Nothing was written - please try again.")
 
 

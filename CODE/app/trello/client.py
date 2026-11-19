@@ -6,11 +6,15 @@ board only.
 from __future__ import annotations
 
 import json
+import logging
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional, Protocol
 
 from ..schema import Action, Card
+
+log = logging.getLogger(__name__)
 
 
 class TrelloLike(Protocol):
@@ -50,8 +54,17 @@ class TrelloClient:
         params = {k: v for k, v in params.items() if v not in (None, "", [])}
         url = f"{self.BASE}{path}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(url, method=method)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode() or "{}")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as e:
+            # Trello's response body says WHY (e.g. "invalid id" for an empty
+            # board id, "invalid key" for bad credentials): log it so the bot
+            # log alone explains the failure. The URL is never logged (it
+            # carries key+token).
+            body = e.read().decode(errors="replace")[:200]
+            log.error("Trello %s %s -> HTTP %s: %s", method, path, e.code, body)
+            raise
 
     # -- writes -------------------------------------------------------------
     def create_card(self, card: Card) -> dict:

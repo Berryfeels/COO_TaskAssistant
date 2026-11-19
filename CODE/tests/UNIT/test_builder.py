@@ -68,6 +68,12 @@ class TestRenderOutcome(unittest.TestCase):
                  due="2026-11-01T10:00:00+01:00"), {"name": "Call supplier"})
         self.assertEqual(msg, "Done: 'Call supplier' updated in Trello.")
 
+    def test_result_says_archived_for_archive(self):
+        msg = builder.render_result(
+            card(action=Action.archive, title="", target_card_id="c1",
+                 closed=True), {"name": "Fusking task"})
+        self.assertEqual(msg, "Done: 'Fusking task' archived in Trello.")
+
     def test_result_similar_appended_as_heads_up(self):
         msg = builder.render_result(
             card(), {"name": "Call supplier"},

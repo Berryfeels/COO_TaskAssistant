@@ -71,9 +71,22 @@ Then write one labelled line per field, using these labels exactly:
   question: ONE short clarifying question, only when something is ambiguous
 
 Rules:
+- The five tools (board_cards, search_cards, get_card, list_members,
+  list_lists) are READ-ONLY. Catalogue actions (add_card, update, complete,
+  move_date, archive, add_list, query) are NEVER tools: never call a tool
+  named "archive", "complete" or similar - write the action on the action:
+  line in plain words instead.
 - Give names exactly as the user said them (people, columns, cards). You do
   NOT resolve Trello IDs and never invent them - the parser resolves the
   names against the board.
+- NEVER invent, guess or construct Trello IDs (24-char hex strings): you
+  never need one. Put names on the labelled lines and call the read tools to
+  see what exists. If a read tool returns an error, do NOT retry with
+  made-up IDs - answer with a question: line or use the names you have.
+- Whenever the user says a task is FOR someone or someone must do it
+  ("la task è per Rob", "Rob deve farlo", "assign it to Rob"), ALWAYS put
+  that person on the assign: line.
+- No markdown: no **bold**, no # headers, no code blocks - plain words only.
 - Use the tools (board_cards, list_members, list_lists, search_cards,
   get_card) to check which card, person or column the user means BEFORE
   answering. If several match or none does, use one question: line.
@@ -182,6 +195,8 @@ class MistralLLM:
             {"role": "user", "content": text},
         ]
 
+        unknown_tool: str | None = None
+        last_tool_error: Exception | None = None
         for _ in range(5):                       # tool-use loop, bounded
             msg = self._complete(messages)
             calls = msg.get("tool_calls") or []
@@ -192,17 +207,54 @@ class MistralLLM:
                                 "content": msg.get("content")})
                 del history[:-self.MAX_HISTORY]
                 # the LLM spoke in words; the parser fills the Card JSON
+                # (raw_text = the user's original message, for the
+                # deterministic assignee fallback on add_card)
                 card = self._parser.parse(msg.get("content") or "", user,
-                                          today, trello)
+                                          today, trello, raw_text=text)
                 log.info("LLM words -> %s", card.action.value)
                 return card
             messages.append(msg)
             for call in calls:
                 fn = call["function"]
                 args = json.loads(fn.get("arguments") or "{}")
+                try:
+                    content = json.dumps(
+                        self._call_tool(fn["name"], args, trello))
+                except ValueError as e:
+                    # the model called something that is not a read tool
+                    # (typically an action name like "archive"): answer as a
+                    # tool error so the model self-corrects inside the loop
+                    unknown_tool = fn["name"]
+                    log.warning("LLM called unknown tool %r", fn["name"])
+                    content = json.dumps({
+                        "error": str(e),
+                        "hint": "Catalogue actions (add_card, update, complete, "
+                                "move_date, archive, add_list, query) are NOT "
+                                "tools. Write the action on the action: line in "
+                                "plain words. The only tools are the read-only: "
+                                "board_cards, search_cards, get_card, "
+                                "list_members, list_lists."})
+                except Exception as e:
+                    # a READ tool failed (e.g. get_card with a hallucinated
+                    # ID -> HTTP 400/404): answer as a tool error so the
+                    # model self-corrects instead of crashing the whole turn
+                    last_tool_error = e
+                    log.warning("tool %s failed: %r", fn["name"], e)
+                    content = json.dumps({
+                        "error": f"tool {fn['name']} failed: {e}",
+                        "hint": "Do NOT retry with invented IDs. Use "
+                                "board_cards / list_members / list_lists to "
+                                "see what exists, or answer with a question: "
+                                "line."})
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"],
-                    "name": fn["name"],
-                    "content": json.dumps(self._call_tool(fn["name"], args,
-                                                          trello))})
+                    "name": fn["name"], "content": content})
+        if unknown_tool:
+            # still failing after the bounded loop: tell the USER the problem
+            # first, never a bare "something went wrong"
+            raise Clarification(
+                f'The tool "{unknown_tool}" is unknown, sorry. '
+                "Please write something else.")
+        if last_tool_error is not None:
+            raise last_tool_error      # pipeline renders it problem-first
         raise Clarification("I could not resolve that. Can you rephrase?")

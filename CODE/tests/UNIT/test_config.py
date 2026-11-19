@@ -3,7 +3,7 @@ import os
 import unittest
 from unittest import mock
 
-from app.config import _load
+from app.config import _load, missing_required
 
 
 class TestSettings(unittest.TestCase):
@@ -18,6 +18,7 @@ class TestSettings(unittest.TestCase):
         self.assertEqual((s.reminder_quiet_start, s.reminder_quiet_end), (2, 5))
         self.assertEqual(s.simplex_ws_url, "ws://127.0.0.1:5225")
         self.assertEqual(s.mistral_model, "mistral-small-latest")
+        self.assertEqual(s.mistral_stt_model, "voxtral-mini-latest")
         self.assertEqual(s.trello_board_sandbox_id, "")
 
     def test_env_overrides(self):
@@ -29,6 +30,7 @@ class TestSettings(unittest.TestCase):
                "TRELLO_BOARD_SANDBOX_ID": "sb1",
                "TRELLO_DEFAULT_LIST_ID": "L1", "MISTRAL_API_KEY": "mk",
                "MISTRAL_MODEL": "mistral-large-latest",
+               "MISTRAL_STT_MODEL": "voxtral-small-latest",
                "SIMPLEX_WS_URL": "ws://10.0.0.1:9999"}
         with mock.patch.dict(os.environ, env, clear=True):
             s = _load()
@@ -45,7 +47,28 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(s.trello_default_list_id, "L1")
         self.assertEqual(s.mistral_api_key, "mk")
         self.assertEqual(s.mistral_model, "mistral-large-latest")
+        self.assertEqual(s.mistral_stt_model, "voxtral-small-latest")
         self.assertEqual(s.simplex_ws_url, "ws://10.0.0.1:9999")
+
+
+class TestMissingRequired(unittest.TestCase):
+    def test_all_four_missing_by_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(missing_required(_load()),
+                             ["TRELLO_KEY", "TRELLO_TOKEN", "TRELLO_BOARD_ID",
+                              "MISTRAL_API_KEY"])
+
+    def test_none_missing_when_set(self):
+        env = {"TRELLO_KEY": "k", "TRELLO_TOKEN": "t", "TRELLO_BOARD_ID": "b",
+               "MISTRAL_API_KEY": "m"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(missing_required(_load()), [])
+
+    def test_partial_config_reports_only_the_missing_ones(self):
+        env = {"TRELLO_KEY": "k", "MISTRAL_API_KEY": "m"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(missing_required(_load()),
+                             ["TRELLO_TOKEN", "TRELLO_BOARD_ID"])
 
 
 if __name__ == "__main__":

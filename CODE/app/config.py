@@ -29,7 +29,19 @@ class Settings:
     trello_default_list_id: str = ""       # where creates land when no column is named
     mistral_api_key: str = ""
     mistral_model: str = "mistral-small-latest"
+    mistral_stt_model: str = "voxtral-mini-latest"   # Mistral audio transcription
     simplex_ws_url: str = "ws://127.0.0.1:5225"
+
+
+def missing_required(s: Settings) -> list[str]:
+    """Names of required settings that are empty. Checked at startup: without
+    them every Trello/Mistral call fails deep in the pipeline with a cryptic
+    HTTP error (e.g. an empty TRELLO_BOARD_ID makes Trello answer 400
+    "invalid id" on /boards//members)."""
+    values = {"TRELLO_KEY": s.trello_key, "TRELLO_TOKEN": s.trello_token,
+              "TRELLO_BOARD_ID": s.trello_board_id,
+              "MISTRAL_API_KEY": s.mistral_api_key}
+    return [name for name, value in values.items() if not value]
 
 
 def _load() -> Settings:
@@ -48,6 +60,7 @@ def _load() -> Settings:
         trello_default_list_id=_env("TRELLO_DEFAULT_LIST_ID", ""),
         mistral_api_key=_env("MISTRAL_API_KEY", ""),
         mistral_model=_env("MISTRAL_MODEL", "mistral-small-latest"),
+        mistral_stt_model=_env("MISTRAL_STT_MODEL", "voxtral-mini-latest"),
         simplex_ws_url=_env("SIMPLEX_WS_URL", "ws://127.0.0.1:5225"),
     )
 

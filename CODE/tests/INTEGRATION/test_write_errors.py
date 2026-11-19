@@ -60,7 +60,7 @@ class TestLLMFailure(unittest.TestCase):
         h = make_pipeline(script=[RuntimeError("API down")])
         incoming(h.pipe, "u", "m1", "hello")
         msg = last_reply(h.gateway)
-        self.assertIn("something went wrong", msg)
+        self.assertIn("API down", msg)              # the problem is stated first
         self.assertIn("Nothing was written", msg)
         self.assertEqual(h.trello.calls, [])
         self.assertTrue(h.db.already_processed("m1"))

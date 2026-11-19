@@ -2,8 +2,10 @@
 (method, path, auth params, default-list fallback, lazy board-ID resolution,
 create_list request). No network: urllib.request.urlopen is stubbed.
 """
+import io
 import json
 import unittest
+import urllib.error
 from unittest import mock
 
 from app.schema import Action, Card
@@ -223,3 +225,23 @@ class TestBoardIdResolution(unittest.TestCase):
         self.assertIn("name", q)
         self.assertEqual([l["id"] for l in lists],
                          ["Ltodo", "Ldoing", "Ldone"])
+
+
+class TestHTTPErrorLogging(unittest.TestCase):
+    def test_error_body_is_logged_and_exception_reraised(self):
+        # the real-world case: empty board id -> GET /boards//members -> 400
+        err = urllib.error.HTTPError(
+            "https://api.trello.com/1/boards//members", 400, "Bad Request",
+            {}, io.BytesIO(b"invalid id"))
+
+        def raising(req, *a, **kw):
+            raise err
+
+        with mock.patch("urllib.request.urlopen", raising):
+            with self.assertLogs("app.trello.client", level="ERROR") as cm:
+                with self.assertRaises(urllib.error.HTTPError):
+                    TrelloClient("k", "t", "").list_members()
+        self.assertIn("HTTP 400", cm.output[0])
+        self.assertIn("invalid id", cm.output[0])   # Trello's reason
+        self.assertIn("/boards//members", cm.output[0])
+        self.assertNotIn("key=", cm.output[0])      # never log credentials

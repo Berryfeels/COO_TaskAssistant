@@ -68,6 +68,22 @@ class TestWriteOrdering(unittest.TestCase):
                                   ("db_mark_processed", "m1")])
 
 
+class TestArchive(unittest.TestCase):
+    def test_archive_closes_the_card_in_trello_first(self):
+        h = make_pipeline(script=[Card(action=Action.archive,
+                                        target_card_id="c1", closed=True)])
+        h.trello.cards = [{"id": "c1", "name": "Fusking task", "idList": "Ltodo",
+                           "due": None, "dueComplete": False, "closed": False}]
+        events = spy_order(h)
+        incoming(h.pipe, "u", "m1", "Archive the fusking task")
+        self.assertEqual(events, [("trello_apply", "archive"),
+                                  ("db_mark_processed", "m1")])
+        self.assertTrue(h.trello.cards[0]["closed"])      # PUT closed=true
+        self.assertEqual(h.trello.cards[0]["name"], "Fusking task")  # not deleted
+        self.assertIn("Done: 'Fusking task' archived in Trello.",
+                      last_reply(h.gateway))
+
+
 class TestFailedWriteLeavesDbConsistent(unittest.TestCase):
     def test_failed_write_notifies_and_nothing_is_recorded(self):
         h = make_pipeline(script=[add("X")])
