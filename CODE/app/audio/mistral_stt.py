@@ -53,6 +53,8 @@ class MistralSTT:
         req.add_header("Authorization", f"Bearer {self.api_key}")
         req.add_header("Content-Type",
                         f"multipart/form-data; boundary={boundary}")
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        # 600s: long recordings (up to 3h with voxtral-mini-transcribe-3) can
+        # take minutes server-side before the first response byte
+        with urllib.request.urlopen(req, timeout=600) as resp:
             payload = json.loads(resp.read())
         return (payload.get("text") or "").strip()

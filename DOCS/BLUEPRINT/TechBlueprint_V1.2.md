@@ -1,10 +1,15 @@
-# COO Task Management Tool — Technical Blueprint V1.1 (audio messages implemented)
+# COO Task Management Tool — Technical Blueprint V1.2 (audio messages + STT model voxtral-mini-transcribe-3)
 
-Full blueprint, derived from `TechBlueprint_V1.0.md`.
+Full blueprint, derived from `TechBlueprint_V1.1.md`.
+
+**Changes in V1.2 — STT model for long audio (the audio implementation itself is V1.1, unchanged):**
+- **STT model `voxtral-mini-transcribe-3`** via `MISTRAL_STT_MODEL` in `CODE/.env`: the batch transcribe model documented for **long recordings up to 3 hours in a single request**. `voxtral-mini-transcribe-2` is retired (verified live against the API: HTTP 400 `invalid_model`); `voxtral-mini-latest` and `voxtral-small-transcribe-3` also answer 200 on short files.
+- **STT HTTP timeout raised 120 s → 600 s** (`app/audio/mistral_stt.py`): long recordings can take minutes server-side before the first response byte.
+- File cap of the transcription API stays **500 MB**; beyond 3 h, chunk the audio inside the `transcriber` hook (see 2.5.1).
 
 **Changes in V1.1 — audio (voice) messages:**
 - **Audio is implemented and live** (V1.0: "not yet implemented"). The design principle stays: the Orchestrator LLM takes only text; audio is transcribed *before* the pipeline, at the gateway (new section 2.5).
-- **STT engine: Mistral Voxtral via REST** (`POST https://api.mistral.ai/v1/audio/transcriptions`, multipart, stdlib only) — not ffmpeg+Whisper. Model from `MISTRAL_STT_MODEL` (default `voxtral-mini-latest`). The transcriber is a swappable hook (`gateway.transcriber`); the chatBHT STT service can replace it later without touching the gateway.
+- **STT engine: Mistral Voxtral via REST** (`POST https://api.mistral.ai/v1/audio/transcriptions`, multipart, stdlib only) — not ffmpeg+Whisper. Model from `MISTRAL_STT_MODEL`, set to **`voxtral-mini-transcribe-3`** in `CODE/.env` (V1.2). The transcriber is a swappable hook (`gateway.transcriber`); the chatBHT STT service can replace it later without touching the gateway.
 - **New component:** `app/audio/mistral_stt.py` (`MistralSTT`), wired in `scripts/run_bot.py`; gateway media seam in `app/gateway/simplex.py` (`_extract_media` / `_handle_media` / `receive_file`).
 - **File download from the SimpleX CLI** over the same WebSocket: `/freceive <fileId>`, path resolved from the `rcvFileComplete`/updated-`newChatItems` event or a filesystem poll (cwd, `~/Downloads`). Media handling runs as a background task — awaiting it in the read loop self-deadlocks (regression-tested).
 - **Operational requirement (multi-user):** SimpleX apps ≥ v6.2 use two preset operators — SimpleX (`*.simplex.im`) and Flux (`*.simplexonflux.com`) — with 6 preset XFTP servers each (12 total). The CLI only receives files whose servers are in its known list (`protocol_servers` in `<profile>_chat.db`); otherwise `/freceive` fails with `fileNotApproved`/`unknownServers`. The bot's CLI profile must know **all 12 preset XFTP servers** (see 2.5.5 and 7.1).
@@ -120,7 +125,8 @@ newChatItems event (voice item)
 
 #### 2.5.1 STT client (`app/audio/mistral_stt.py`)
 
-- `POST https://api.mistral.ai/v1/audio/transcriptions`, `multipart/form-data`: `model` (`MISTRAL_STT_MODEL`, default `voxtral-mini-latest`), `response_format=json`, optional `language`, `file` (the audio bytes, content-type guessed from the filename). `Authorization: Bearer MISTRAL_API_KEY`. Stdlib only (`urllib.request`), HTTP timeout **120 s**.
+- `POST https://api.mistral.ai/v1/audio/transcriptions`, `multipart/form-data`: `model` (`MISTRAL_STT_MODEL`, set to `voxtral-mini-transcribe-3` in `CODE/.env` since V1.2; `voxtral-mini-latest` was the V1.1 default), `response_format=json`, optional `language`, `file` (the audio bytes, content-type guessed from the filename). `Authorization: Bearer MISTRAL_API_KEY`. Stdlib only (`urllib.request`), HTTP timeout **600 s** (V1.2; was 120 s in V1.1 — long recordings can take minutes server-side before the first response byte).
+- **Long recordings (V1.2):** the Transcribe batch models accept **up to 3 h of audio in one request** (Mistral docs); the hard file cap is **500 MB**, and the client still reads the whole file + multipart body into RAM (~2× file size — fine up to hundreds of MB). So 1–1.5 h recordings (≈15–90 MB as m4a/opus) work in a single call. Beyond 3 h or for very large files, chunk the audio (e.g. `ffmpeg -f segment -segment_time 600`) inside the `transcriber` hook and merge the transcripts. Caveat: the XFTP download in `receive_file` still has a 120 s wait — very large files on slow links may need a larger timeout there too. Note: SimpleX apps cap *voice notes* at ~5 min, so long recordings arrive as **files**, which the gateway handles identically (2.5.2).
 - Response `{"text": "..."}` → the stripped transcript. Missing API key raises before any request.
 - Verified live: a 4 s `.m4a` voice note returns HTTP 200 in ~0.3–0.4 s with the correct text.
 
@@ -224,7 +230,7 @@ Status: **not yet implemented**. Purpose: tell the system about changes it did n
 | Layer | Options (as implemented) |
 | --- | --- |
 | Chat interface | SimpleX Chat CLI in WebSocket API mode + Python client |
-| Audio | **Implemented (V1.1):** Mistral Voxtral STT via REST (`POST /v1/audio/transcriptions`, multipart, stdlib only; `MISTRAL_STT_MODEL`, default `voxtral-mini-latest`; HTTP timeout 120 s). Files are fetched from the CLI with `/freceive` over the same WebSocket. chatBHT STT service is the planned in-house replacement — swap only the `transcriber` hook (2.5). |
+| Audio | **Implemented (V1.1), model upgraded in V1.2:** Mistral Voxtral STT via REST (`POST /v1/audio/transcriptions`, multipart, stdlib only; `MISTRAL_STT_MODEL=voxtral-mini-transcribe-3` in `CODE/.env` — long recordings up to 3 h per request, file cap 500 MB; HTTP timeout 600 s). Files are fetched from the CLI with `/freceive` over the same WebSocket. chatBHT STT service is the planned in-house replacement — swap only the `transcriber` hook (2.5). |
 | LLM | Mistral API chat completions with function calling, stdlib only; bounded tool loop (5), per-user history (12 turns) |
 | Orchestration | Plain Python, no framework |
 | Webhook endpoint | (not yet implemented) FastAPI/Node behind public HTTPS |
